@@ -1,7 +1,7 @@
 MIT License
 
-Copyright (c) 2026 Corrine Hu (original dsh-workbuddy-connect)
-Copyright (c) 2026 workbuddy-connect contributors (ZCode port)
+Copyright (c) 2026 Corrine Hu
+Copyright (c) 2026 workbuddy-connect contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,10 +20,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This project is a port of https://github.com/corrinehu/dsh-workbuddy-connect
-(MIT, Copyright (c) 2026 Corrine Hu) from the DeepSeek Harness plugin API to
-ZCode's. The upstream project in turn ports its wire behaviour from
-https://github.com/Sliverkiss/workbuddy2api (MIT).

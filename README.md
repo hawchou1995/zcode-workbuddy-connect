@@ -137,3 +137,6 @@ state. See `.gitignore` — state lives in `%USERPROFILE%\.workbuddy-connect\`, 
 
 MIT, following the original. The wire behaviour is itself ported by the original
 project from [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) (MIT).
+
+See [NOTICE.md](./NOTICE.md) for exactly which parts were carried over from the
+upstream and which were rewritten for this port.
