@@ -1,0 +1,30 @@
+# Dependencies (this project intentionally has none, but keep the door closed)
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Runtime state — never commit. The credential copy and the endpoint bearer
+# live here; publishing either would hand over a live WorkBuddy session.
+.workbuddy-connect/
+.workbuddy-auth.json
+.workbuddy-ai-auth.json
+endpoint.json
+*.log
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# Scratch
+*.tmp
+*.bak

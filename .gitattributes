@@ -1,0 +1,7 @@
+# Normalise line endings so the repo is checkout-stable across platforms.
+# The service runs on Windows in practice, but the source is portable.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary

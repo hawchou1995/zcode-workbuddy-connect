@@ -1,0 +1,33 @@
+{
+  "name": "workbuddy-connect",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Expose WorkBuddy desktop-app models (CN) through a loopback OpenAI-compatible endpoint, for use as a model provider in ZCode or any OpenAI-compatible client.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "bin": {
+    "workbuddy-connect": "./bin/cli.mjs"
+  },
+  "exports": {
+    ".": "./src/upstream.js",
+    "./server": "./src/server.js",
+    "./auth": "./src/auth.js",
+    "./catalog": "./src/catalog.js"
+  },
+  "scripts": {
+    "serve": "node bin/cli.mjs serve",
+    "status": "node bin/cli.mjs status",
+    "doctor": "node bin/cli.mjs doctor"
+  },
+  "dependencies": {},
+  "keywords": [
+    "workbuddy",
+    "codebuddy",
+    "openai-compatible",
+    "provider",
+    "zcode"
+  ]
+}
