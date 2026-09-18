@@ -39,6 +39,10 @@ what makes the endpoint work at all):**
   — see the git history.
 - Windows is the primary target, so the App-version and credential probes cover
   Windows install roots rather than macOS bundles.
+- The international catalog's User-Agent was CORRECTED relative to upstream:
+  the gateway now rejects the App-shaped UA with HTTP 400 (code 12403) and
+  requires the CLI-form UA (live-verified 2026-09-18). Upstream's assumption
+  no longer holds on today's wire.
 
 ## Licence
 

@@ -8,9 +8,13 @@ ZCode's.
 - **Provider entry**: `workbuddy` in `%USERPROFILE%\.zcode\v2\provider_config.json`
 - **Endpoint**: `http://127.0.0.1:39271/v1` (loopback only)
 - **State**: `%USERPROFILE%\.workbuddy-connect\`
-- **Roster**: 16 models — GLM-5.3 / 5.3-Flash / 5.2 / 5.1 / 5v-Turbo,
-  DeepSeek-V4-Pro / V4.1-Flash, Kimi-K3 / K2.8-Preview / K2.7 / K2.6,
-  MiniMax-M3, Hy4-preview / Hy3 (free) / Hy3-X, Auto
+- **Roster**: 36 models across two regions — CN (16): GLM-5.3 / 5.3-Flash /
+  5.2 / 5.1 / 5v-Turbo, DeepSeek-V4-Pro / V4.1-Flash, Kimi-K3-1 / K2.8-Preview /
+  K2.7 / K2.6, MiniMax-M3, Hy4-preview / Hy3 (free) / Hy3-X, Auto; AI (20,
+  `wbai:` prefixed): GPT-5.6 Sol / Terra / Luna, GPT-5.5 / 5.4, GPT-6-Astra,
+  Gemini-3.5-Flash, GLM-5.3 / 5.2, Kimi-K3 / K2.8-Preview / K2.6,
+  DeepSeek-V4.1-Flash (free), Hy4-preview / Hy3 (free), Auto / Fast / Balanced /
+  Primary / Deep
 - **Skill**: `workbuddy-models` — how to operate and troubleshoot it
 
 ## Start / stop

@@ -18,11 +18,15 @@ const OWN_FORMAT_VERSION = 1
 
 /** Basename of the desktop app's own auth file in the shared auth directory. */
 export const DESKTOP_AUTH_FILENAME = 'workbuddy-desktop.info'
+/** Basename of the international app's auth file (same directory, different app). */
+export const DESKTOP_AUTH_AI_FILENAME = 'workbuddy-desktop-ai.info'
 
 const DESKTOP_AUTH_RELATIVE_PATH = ['CodeBuddyExtension', 'Data', 'Public', 'auth', DESKTOP_AUTH_FILENAME]
 
 /** Env variable that overrides the desktop auth-file location. */
 export const WORKBUDDY_AUTH_FILE_ENV = 'WORKBUDDY_AUTH_FILE'
+/** Env variable overriding the international desktop auth-file location. */
+export const WORKBUDDY_AI_AUTH_FILE_ENV = 'WORKBUDDY_AI_AUTH_FILE'
 
 /** Normalize an expiry that may arrive in seconds or milliseconds. */
 function expiryToMs(value) {
@@ -39,24 +43,28 @@ function isObject(value) {
 }
 
 /**
- * Platform-default candidates for the WorkBuddy desktop app's auth file, in
- * probe order. Windows probes both AppData roots: current builds write under
- * `%LOCALAPPDATA%` (Local), older ones under `%APPDATA%` (Roaming).
+ * Platform-default candidates for one variant's auth file, in probe order.
+ * Windows probes both AppData roots: current builds write under
+ * `%LOCALAPPDATA%` (Local), older ones under `%APPDATA%` (Roaming). The two
+ * apps share the directory and differ only in basename.
+ *
+ * @param {string} desktopFilename which variant's file to look for
  */
-export function defaultDesktopAuthCandidates() {
+export function defaultDesktopAuthCandidates(desktopFilename = DESKTOP_AUTH_FILENAME) {
+  const relative = ['CodeBuddyExtension', 'Data', 'Public', 'auth', desktopFilename]
   const home = homedir()
   if (process.platform === 'win32') {
     const local = process.env['LOCALAPPDATA'] ?? join(home, 'AppData', 'Local')
     const roaming = process.env['APPDATA'] ?? join(home, 'AppData', 'Roaming')
     return [
-      join(local, ...DESKTOP_AUTH_RELATIVE_PATH),
-      join(roaming, ...DESKTOP_AUTH_RELATIVE_PATH),
+      join(local, ...relative),
+      join(roaming, ...relative),
     ]
   }
   if (process.platform === 'darwin') {
-    return [join(home, 'Library', 'Application Support', ...DESKTOP_AUTH_RELATIVE_PATH)]
+    return [join(home, 'Library', 'Application Support', ...relative)]
   }
-  return [join(home, '.config', ...DESKTOP_AUTH_RELATIVE_PATH)]
+  return [join(home, '.config', ...relative)]
 }
 
 /**
@@ -151,7 +159,9 @@ export class WorkBuddyCredentialStore {
    * @param {object} options
    * @param {(credential: object) => Promise<object>} options.refresh performs the upstream token refresh
    * @param {string} options.ownPath plugin-owned credential copy path
-   * @param {string} [options.desktopPath] explicit desktop auth-file path
+   * @param {string} [options.desktopPath] explicit desktop auth-file path   * @param {string} [options.desktopFilename] basename for the platform-default probe (variant selection)
+   * @param {string} [options.authFileEnv] env var overriding the desktop path (default WORKBUDDY_AUTH_FILE)
+   * @param {string} [options.appName] display name for diagnostics ('WorkBuddy' | 'WorkBuddy AI')
    * @param {number} [options.refreshMarginMs] refresh this long before expiry
    */
   constructor(options) {
@@ -159,6 +169,9 @@ export class WorkBuddyCredentialStore {
     this.refreshMarginMs = options.refreshMarginMs ?? 5 * 60 * 1000
     this.ownPath = options.ownPath
     this.desktopPathOverride = options.desktopPath
+    this.desktopFilename = options.desktopFilename ?? DESKTOP_AUTH_FILENAME
+    this.authFileEnv = options.authFileEnv ?? WORKBUDDY_AUTH_FILE_ENV
+    this.appName = options.appName ?? 'WorkBuddy'
     this.inflight = undefined
   }
 
@@ -167,11 +180,11 @@ export class WorkBuddyCredentialStore {
    * the environment variable, then the platform defaults.
    */
   resolveDesktopCandidates() {
-    const fromEnv = process.env[WORKBUDDY_AUTH_FILE_ENV]
+    const fromEnv = process.env[this.authFileEnv]
     const explicit = this.desktopPathOverride
       ?? (fromEnv !== undefined && fromEnv.trim() !== '' ? fromEnv : undefined)
     if (explicit !== undefined) return [explicit]
-    return defaultDesktopAuthCandidates()
+    return defaultDesktopAuthCandidates(this.desktopFilename)
   }
 
   /** The resolved desktop auth-file path, for diagnostics. */
@@ -209,9 +222,9 @@ export class WorkBuddyCredentialStore {
       const candidates = this.resolveDesktopCandidates()
       const desktop = candidates.length > 0 ? candidates.join(' or ') : '(no desktop path on this platform)'
       throw new Error(
-        'workbuddy: no signed-in WorkBuddy account found; sign in once in the WorkBuddy desktop app'
-        + ` (expected ${desktop} or ${WORKBUDDY_AUTH_FILE_ENV})`,
-      )
+        `workbuddy: no signed-in ${this.appName} account found; sign in once in the ${this.appName} desktop app`
+        + ` (expected ${desktop} or ${this.authFileEnv})`,
+ )
     }
     if (!this.needsRefresh(credential)) return credential
     this.inflight ??= this.refreshNow(credential).finally(() => {

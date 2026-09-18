@@ -534,10 +534,18 @@ export class WorkBuddyUpstreamClient {
     return outcome
   }
 
-  /** GET the personal model catalog. */
+  /**
+   * GET the personal catalog.
+   *
+   * UA discipline per region (live-verified 2026-09-18): the international
+   * gateway (`/v3/config`) REJECTS the App-shaped UA with HTTP 400 code 12403
+   * ("check ua, get coding copilot version error") and requires the CLI-form
+   * UA; the CN endpoint is indifferent but has always used the CLI UA. The
+   * upstream plugin's assumption that `/v3/config` needs the App UA is wrong
+   * on today's wire — keep this CLI UA unless a live probe says otherwise.
+   */
   async fetchModels(credential, signal) {
     const international = regionOf(credential.domain) === 'global'
-    const appVersion = international ? await this.resolveAppVersion() : undefined
     const url = `${chatBase(credential)}${international ? '/v3/config' : '/console/enterprises/personal/models'}`
     const response = await fetch(url, {
       headers: {
@@ -546,7 +554,7 @@ export class WorkBuddyUpstreamClient {
         Origin: originReferer(credential),
         Referer: `${originReferer(credential)}/`,
         ...(international ? { 'X-Requested-With': 'XMLHttpRequest', 'X-Product': 'SaaS' } : {}),
-        'User-Agent': appVersion === undefined ? CLIENT_UA : appUserAgent(appVersion.version),
+        'User-Agent': CLIENT_UA,
       },
       signal: signal === undefined
         ? AbortSignal.timeout(JSON_TIMEOUT_MS)
@@ -562,8 +570,7 @@ export class WorkBuddyUpstreamClient {
     const models = parseModelCatalog(data, international)
     this.lastCatalog = {
       fetchedAtMs: Date.now(),
-      source: international ? 'workbuddy-ai:app' : 'workbuddy:cli',
-      ...(appVersion === undefined ? {} : { appVersion }),
+      source: international ? 'workbuddy-ai:cli' : 'workbuddy:cli',
     }
     return models
   }

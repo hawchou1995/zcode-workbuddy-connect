@@ -17,7 +17,7 @@ import { readFile, writeFile, mkdir, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { WorkBuddyCredentialStore, defaultDesktopAuthCandidates } from './auth.js'
+import { WorkBuddyCredentialStore, DESKTOP_AUTH_FILENAME, DESKTOP_AUTH_AI_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_AI_AUTH_FILE_ENV } from './auth.js'
 import { WorkBuddyCatalog } from './catalog.js'
 import { WorkBuddyUpstreamClient } from './upstream.js'
 import { createWorkBuddyServer } from './server.js'
@@ -27,6 +27,7 @@ import {
   defaultStateDir,
   endpointPath,
   loadToken,
+  ownAuthAiPath,
   ownAuthPath,
   setToken,
   stateDir,
@@ -112,58 +113,90 @@ async function ensureToken(args) {
   return token
 }
 
-function buildStore(args) {
-  const client = new WorkBuddyUpstreamClient()
-  const store = new WorkBuddyCredentialStore({
-    refresh: credential => client.refreshToken(credential),
+/**
+ * The two regions this service serves. Each gets its own credential store
+ * (separate desktop file, separate owned copy, separate env override) and its
+ * own catalog; the international variant's models are prefixed `wbai:` on the
+ * wire so the shared ids (glm-5.3, hy3…) stay distinct.
+ */
+const VARIANTS = [
+  {
+    id: 'cn',
+    prefix: '',
+    appName: 'WorkBuddy',
+    desktopFilename: DESKTOP_AUTH_FILENAME,
+    authFileEnv: WORKBUDDY_AUTH_FILE_ENV,
     ownPath: ownAuthPath(),
-    ...(typeof args.authFile === 'string' ? { desktopPath: args.authFile } : {}),
-  })
-  return { store, client }
+  },
+  {
+    id: 'ai',
+    prefix: 'wbai:',
+    appName: 'WorkBuddy AI',
+    desktopFilename: DESKTOP_AUTH_AI_FILENAME,
+    authFileEnv: WORKBUDDY_AI_AUTH_FILE_ENV,
+    ownPath: ownAuthAiPath(),
+  },
+]
+
+function buildStores(args) {
+  const client = new WorkBuddyUpstreamClient()
+  const stores = VARIANTS.map(variant => ({
+    ...variant,
+    store: new WorkBuddyCredentialStore({
+      refresh: credential => client.refreshToken(credential),
+      ownPath: variant.ownPath,
+      desktopFilename: variant.desktopFilename,
+      authFileEnv: variant.authFileEnv,
+      appName: variant.appName,
+      ...(variant.id === 'cn' && typeof args.authFile === 'string' ? { desktopPath: args.authFile } : {}),
+    }),
+  }))
+  return { client, stores }
 }
 
-/** Preflight: parse the auth file and report what a user can act on. */
+/** Preflight: parse the auth files and report what a user can act on. */
 async function commandDoctor(args) {
-  const { store, client } = buildStore(args)
-  const report = { stateDir: stateDir(), desktopAuthPath: store.desktopAuthPath(), ownAuthPath: ownAuthPath(), checks: [] }
+  const { client, stores } = buildStores(args)
+  const report = { stateDir: stateDir(), ownAuthPath: ownAuthPath(), ownAuthAiPath: ownAuthAiPath(), checks: [] }
 
-  const candidates = store.resolveDesktopCandidates()
-  report['desktopCandidates'] = candidates
-  const present = candidates.filter(path => existsSync(path))
-  report['checks'].push({
-    name: 'desktop auth file',
-    ok: present.length > 0,
-    detail: present.length > 0 ? present[0] : `not found; looked at ${candidates.join(' , ')}`,
-  })
+  for (const { id, appName, store } of stores) {
+    const candidates = store.resolveDesktopCandidates()
+    const present = candidates.filter(path => existsSync(path))
+    report['checks'].push({
+      name: `${appName} auth file`,
+      ok: present.length > 0,
+      detail: present.length > 0 ? present[0] : `not found; looked at ${candidates.join(' , ')}`,
+    })
 
-  const status = await store.status()
-  report['authStatus'] = status
-  report['checks'].push({
-    name: 'signed in',
-    ok: status.state === 'signed-in',
-    detail: status.state === 'signed-in'
-      ? `${status.nickname ?? '(unnamed)'} · uid ${mask(status.uid)} · expires ${formatTime(status.expiresAtMs)}`
-      : (status.reason ?? 'no credential found; sign in once in the WorkBuddy desktop app'),
-  })
+    const status = await store.status()
+    report[`${id}AuthStatus`] = status
+    report['checks'].push({
+      name: `${appName} signed in`,
+      ok: status.state === 'signed-in',
+      detail: status.state === 'signed-in'
+        ? `${status.nickname ?? '(unnamed)'} · uid ${mask(status.uid)} · expires ${formatTime(status.expiresAtMs)}`
+        : (status.reason ?? `no credential found; sign in once in the ${appName} desktop app`),
+    })
 
-  if (status.state === 'signed-in') {
-    try {
-      const credential = await store.resolve()
-      const models = await client.fetchModels(credential)
-      report['checks'].push({ name: 'catalog fetch', ok: true, detail: `${models.length} models from ${client.lastCatalog?.source}` })
+    if (status.state === 'signed-in') {
       try {
-        const credits = await client.fetchCredits(credential)
-        report['credits'] = credits
-        report['checks'].push({
-          name: 'credit lookup',
-          ok: true,
-          detail: credits.unlimited === true ? 'unlimited cycle quota' : `total ${credits.total} across ${credits.accounts.length} package(s)`,
-        })
+        const credential = await store.resolve()
+        const models = await client.fetchModels(credential)
+        report['checks'].push({ name: `${appName} catalog`, ok: true, detail: `${models.length} models from ${client.lastCatalog?.source}` })
+        try {
+          const credits = await client.fetchCredits(credential)
+          report[`${id}Credits`] = credits
+          report['checks'].push({
+            name: `${appName} credit`,
+            ok: true,
+            detail: credits.unlimited === true ? 'unlimited cycle quota' : `total ${credits.total} across ${credits.accounts.length} package(s)`,
+          })
+        } catch (error) {
+          report['checks'].push({ name: `${appName} credit`, ok: false, detail: String(error) })
+        }
       } catch (error) {
-        report['checks'].push({ name: 'credit lookup', ok: false, detail: String(error) })
+        report['checks'].push({ name: `${appName} catalog`, ok: false, detail: String(error) })
       }
-    } catch (error) {
-      report['checks'].push({ name: 'catalog fetch', ok: false, detail: String(error) })
     }
   }
 
@@ -175,14 +208,14 @@ async function commandDoctor(args) {
     console.log(JSON.stringify(report, null, 2))
   } else {
     console.log(`workbuddy-connect doctor`)
-    console.log(`  state dir         ${report.stateDir}`)
-    console.log(`  desktop auth      ${report.desktopAuthPath}`)
+    console.log(`  dir         ${report.stateDir}`)
     console.log(`  own credential    ${report.ownAuthPath}`)
+    console.log(`  own ai credential ${report.ownAuthAiPath}`)
     console.log(`  endpoint          ${report.endpoint.baseUrl}`)
     console.log(`  bearer            ${report.endpoint.token}`)
     console.log('')
     for (const check of report['checks']) {
-      console.log(`  [${check.ok ? ' OK ' : 'FAIL'}] ${check.name.padEnd(18)} ${check.detail}`)
+      console.log(`  [${check.ok ? ' OK ' : 'FAIL'}] ${check.name.padEnd(24)} ${check.detail}`)
     }
   }
   const failed = report['checks'].filter(check => !check.ok)
@@ -190,86 +223,103 @@ async function commandDoctor(args) {
 }
 
 async function commandStatus(args) {
-  const { store, client } = buildStore(args)
-  const status = await store.status()
-  const catalog = new WorkBuddyCatalog()
-  const report = { auth: status }
+  const { client, stores } = buildStores(args)
+  const report = {}
+  const modelReports = []
 
-  if (status.state === 'signed-in') {
-    try {
-      const credential = await store.resolve()
-      const models = await client.fetchModels(credential)
-      catalog.set(models, { source: client.lastCatalog?.source })
-      report['models'] = catalog.current().map(model => ({
-        id: model.id,
-        name: model.name,
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-        supportsImages: model.supportsImages,
-        efforts: model.reasoning?.supportedEfforts ?? (model.reasoning?.defaultEffort === undefined ? [] : [model.reasoning.defaultEffort]),
-        credits: model.billing?.credits,
-        free: model.billing?.free === true,
-        badges: model.billing?.badges ?? [],
-      }))
+  for (const { id, appName, store } of stores) {
+    const status = await store.status()
+    const entry = { auth: status }
+    if (status.state === 'signed-in') {
       try {
-        report['credits'] = await client.fetchCredits(credential)
+        const credential = await store.resolve()
+        const models = await client.fetchModels(credential)
+        entry['models'] = models.map(model => ({
+          id: model.id,
+          name: model.name,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+          supportsImages: model.supportsImages,
+          efforts: model.reasoning?.supportedEfforts ?? (model.reasoning?.defaultEffort === undefined ? [] : [model.reasoning.defaultEffort]),
+          credits: model.billing?.credits,
+          free: model.billing?.free === true,
+          badges: model.billing?.badges ?? [],
+        }))
+        try {
+          entry['credits'] = await client.fetchCredits(credential)
+        } catch (error) {
+          entry['creditsError'] = String(error)
+        }
       } catch (error) {
-        report['creditsError'] = String(error)
+        entry['catalogError'] = String(error)
       }
-    } catch (error) {
-      report['catalogError'] = String(error)
     }
+    report[id] = entry
+    modelReports.push({ id, appName, entry })
   }
 
   if (args.json) {
     console.log(JSON.stringify(report, null, 2))
     return
   }
-  if (status.state !== 'signed-in') {
-    console.log(`Not signed in. ${status.reason ?? 'Sign in once in the WorkBuddy desktop app.'}`)
-    return
-  }
-  console.log(`Signed in: ${status.nickname ?? '(unnamed)'}  (uid ${mask(status.uid)}, source ${status.source})`)
-  console.log(`Token expires:     ${formatTime(status.expiresAtMs)}`)
-  console.log(`Refresh expires:   ${formatTime(status.refreshExpiresAtMs)}`)
-  const credits = report['credits']
-  if (credits !== undefined) {
-    console.log(`Remaining credit:  ${credits.unlimited === true ? 'unlimited (cycle quota)' : credits.total}${credits.cycleResetTime === undefined ? '' : ` · resets ${credits.cycleResetTime}`}`)
-    for (const account of credits.accounts) {
-      console.log(`                   ${account.packageName}: ${account.remain}/${account.size}`)
+  for (const { id, appName, entry } of modelReports) {
+    const status = entry.auth
+    console.log(`\n=== ${appName} (${id}) ===`)
+    if (status.state !== 'signed-in') {
+      console.log(`  Not signed in. ${status.reason ?? `Sign in once in the ${appName} desktop app.`}`)
+      continue
     }
-  } else if (report['creditsError'] !== undefined) {
-    console.log(`Remaining credit:  lookup failed — ${report['creditsError']}`)
-  }
-  const models = report['models'] ?? []
-  console.log(`\nModels (${models.length}):`)
-  for (const model of models) {
-    const flags = [
-      model.supportsImages ? 'img' : 'text-only',
-      model.efforts.length === 0 ? 'no explicit efforts' : `efforts ${model.efforts.join('/')}`,
-      model.free ? 'FREE' : (model.credits ?? 'rate unknown'),
-      ...model.badges,
-    ].join(' · ')
-    console.log(`  ${model.id.padEnd(22)} ${model.name.padEnd(22)} ${String(model.contextWindow).padStart(9)} ctx  ${flags}`)
+    console.log(`  Signed in:       ${status.nickname ?? '(unnamed)'}  (uid ${mask(status.uid)}, source ${status.source})`)
+    console.log(`  Token expires:   ${formatTime(status.expiresAtMs)}`)
+    console.log(`  Refresh expires: ${formatTime(status.refreshExpiresAtMs)}`)
+    const credits = entry['credits']
+    if (credits !== undefined) {
+      console.log(`  Remaining credit: ${credits.unlimited === true ? 'unlimited (cycle quota)' : credits.total}${credits.cycleResetTime === undefined ? '' : ` · resets ${credits.cycleResetTime}`}`)
+    } else if (entry['creditsError'] !== undefined) {
+      console.log(`  Remaining credit: lookup failed — ${entry['creditsError']}`)
+    }
+    const models = entry['models'] ?? []
+    console.log(`  Models (${models.length}):`)
+    for (const model of models) {
+      const flags = [
+        model.supportsImages ? 'img' : 'text-only',
+        model.efforts.length === 0 ? 'no explicit efforts' : `efforts ${model.efforts.join('/')}`,
+        model.free ? 'FREE' : (model.credits ?? 'rate unknown'),
+        ...model.badges,
+      ].join(' · ')
+      console.log(`    ${model.id.padEnd(22)} ${model.name.padEnd(20)} ${String(model.contextWindow).padStart(9)} ctx  ${flags}`)
+    }
   }
 }
 
 async function commandRefresh(args) {
-  const { store, client } = buildStore(args)
-  const credential = await store.resolve()
-  const models = await client.fetchModels(credential)
-  if (args.json) {
-    console.log(JSON.stringify({ source: client.lastCatalog?.source, count: models.length, ids: models.map(m => m.id) }, null, 2))
-  } else {
-    console.log(`Refreshed: ${models.length} models from ${client.lastCatalog?.source}`)
-    console.log(models.map(model => model.id).join(', '))
+  const { client, stores } = buildStores(args)
+  for (const { id, appName, store } of stores) {
+    try {
+      const credential = await store.resolve()
+      const models = await client.fetchModels(credential)
+      if (args.json) {
+        console.log(JSON.stringify({ variant: id, source: client.lastCatalog?.source, count: models.length, ids: models.map(m => m.id) }, null, 2))
+      } else {
+        console.log(`${appName}: refreshed ${models.length} models from ${client.lastCatalog?.source}`)
+        console.log(`  ${models.map(model => model.id).join(', ')}`)
+      }
+    } catch (error) {
+      if (args.json) {
+        console.log(JSON.stringify({ variant: id, ok: false, error: String(error) }, null, 2))
+      } else {
+        console.log(`${appName}: refresh failed — ${String(error)}`)
+      }
+    }
   }
 }
 
 async function commandLogout(args) {
-  const { store } = buildStore(args)
-  await store.logout()
-  console.log(`Removed ${ownAuthPath()} (the desktop app's own sign-in is untouched).`)
+  const { stores } = buildStores(args)
+  for (const { appName, store } of stores) {
+    await store.logout()
+    console.log(`Removed ${store.ownAuthPath()} (the ${appName} desktop app's own sign-in is untouched).`)
+  }
 }
 
 const AUTOSTART_BASENAME = 'workbuddy-connect.vbs'
@@ -387,52 +437,25 @@ async function commandServiceStatus(args) {
   }
 }
 
-/** Write the ZCode provider entry pointing at this endpoint. */
+/** Write the ZCode provider entries pointing at this endpoint (one per region). */
 async function commandSetup(args) {
   const token = await ensureToken(args)
   const port = Number(args.port) || DEFAULT_PORT
   const baseUrl = `http://127.0.0.1:${port}/v1`
   const configPath = args.config ?? join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '.', '.zcode', 'v2', 'provider_config.json')
 
-  const { store, client } = buildStore(args)
-  let modelIds = []
-  try {
-    const credential = await store.resolve()
-    const models = await client.fetchModels(credential)
-    modelIds = models.map(model => model.id)
-  } catch (error) {
-    console.warn(`warning: could not fetch the live roster (${String(error)}); falling back to the static list`)
-    modelIds = new WorkBuddyCatalog().fallback().map(model => model.id)
-  }
+  const { client, stores } = buildStores(args)
 
   let document
   try {
     document = JSON.parse(await readFile(configPath, 'utf8'))
   } catch {
-    document = { schemaVersion: 1, config: { providerOrder: [], providerConfigRules: { providerRules: [] }, modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] } } }
+    document = { schemaVersion: 1, config: { provider: [], providerConfigRules: { providerRules: [] }, modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] } } }
   }
   const config = document['config'] ??= {}
   const order = config['providerOrder'] ??= []
   const rules = config['providerConfigRules'] ??= {}
   const providerRules = rules['providerRules'] ??= []
-
-  const providerId = 'workbuddy'
-  const providerName = 'WorkBuddy'
-  const rule = {
-    providerId,
-    providerName,
-    config: {
-      group: 'standard-personal',
-      access: { type: 'api-key', apiKey: token },
-      api: { type: 'openai-chat-completions', baseUrl },
-      personalModelIds: modelIds,
-      modelOrder: modelIds,
-    },
-  }
-  const existing = providerRules.findIndex(item => item?.providerId === providerId)
-  if (existing === -1) providerRules.push(rule)
-  else providerRules[existing] = rule
-  if (!order.includes(providerId)) order.push(providerId)
 
   // Per-model window and vision flags, so ZCode plans context correctly instead
   // of assuming one window for every row.
@@ -449,46 +472,88 @@ async function commandSetup(args) {
   const modelRules = (config['modelConfigRules'] ??= {})
   const providerModelRules = (modelRules['providerModelRules'] ??= [])
   modelRules['manualProviderModelRules'] ??= []
-  let modelCount = 0
-  try {
-    const credential = await store.resolve()
-    const models = await client.fetchModels(credential)
+
+  const summary = []
+  for (const { id, prefix, appName, store } of stores) {
+    const providerId = id === 'cn' ? 'workbuddy' : 'workbuddy-ai'
+    const providerName = appName
+    let models = []
+    try {
+      const credential = await store.resolve()
+      models = await client.fetchModels(credential)
+    } catch (error) {
+      // No credential for this region is a normal state (app not installed):
+      // skip the provider entirely rather than register one that only fails.
+      console.warn(`warning: ${appName} unavailable, skipping its provider (${String(error)})`)
+      summary.push({ providerId, appName, skipped: true, reason: String(error) })
+      continue
+    }
+
+    // On the wire the AI variant's ids carry the `wbai:` prefix (that is how
+    // the endpoint routes); the model picker shows the prefixed id too, which
+    // is what keeps the shared names (glm-5.3…) distinguishable.
+    const wireIds = models.map(model => prefix === '' ? model.id : `${prefix}${model.id}`)
+
+    const rule = {
+      providerId,
+      providerName,
+      config: {
+        group: 'standard-personal',
+        access: { type: 'api-key', apiKey: token },
+        api: { type: 'openai-chat-completions', baseUrl },
+        personalModelIds: wireIds,
+        modelOrder: wireIds,
+      },
+    }
+    const existing = providerRules.findIndex(item => item?.providerId === providerId)
+    if (existing === -1) providerRules.push(rule)
+    else providerRules[existing] = rule
+    if (!order.includes(providerId)) order.push(providerId)
+
+    let modelCount = 0
     for (const model of models) {
       modelCount += 1
       const properties = { contextWindow: model.contextWindow }
       if (model.supportsImages) {
         properties['inputFormat'] = { supportsImage: true }
       }
-      const entry = { modelId: model.id, providerId, config: { enabled: true, properties } }
-      const index = providerModelRules.findIndex(item => item?.modelId === model.id && item?.providerId === providerId)
+      const entry = { modelId: prefix === '' ? model.id : `${prefix}${model.id}`, providerId, config: { enabled: true, properties } }
+      const index = providerModelRules.findIndex(item => item?.modelId === entry.modelId && item?.providerId === providerId)
       if (index === -1) providerModelRules.push(entry)
       else providerModelRules[index] = entry
     }
-  } catch {
-    // Roster unavailable; the provider row still works, ZCode just has no
-    // per-model hints until the next `setup` run.
+
+    summary.push({ providerId, appName, models: wireIds.length, modelRules: modelCount })
   }
 
   await mkdir(dirname(configPath), { recursive: true })
   await writeFile(configPath, `${JSON.stringify(document, null, 2)}\n`, 'utf8')
 
   if (args.json) {
-    console.log(JSON.stringify({ configPath, providerId, providerName, baseUrl, models: modelIds.length, modelRules: modelCount }, null, 2))
+    console.log(JSON.stringify({ configPath, baseUrl, providers: summary }, null, 2))
     return
   }
-  console.log(`Wrote provider "${providerName}" into ${configPath}`)
+  console.log(`Wrote provider entries into ${configPath}`)
   console.log(`  baseUrl   ${baseUrl}`)
   console.log(`  bearer    ${mask(token)}`)
-  console.log(`  models    ${modelIds.length} (${modelCount} per-model rules)`)
+  for (const item of summary) {
+    if (item.skipped) console.log(`  ${item.appName.padEnd(14)} SKIPPED — ${item.reason.slice(0, 90)}`)
+    else console.log(`  ${item.appName.padEnd(14)} ${item.models} models (${item.modelRules} per-model rules)`)
+  }
 }
 
 async function commandServe(args) {
   const token = await ensureToken(args)
   const port = args.port === undefined ? DEFAULT_PORT : Number(args.port)
   configureEndpoint({ port, token })
-  const { store } = buildStore(args)
+  const { client, stores } = buildStores(args)
 
-  const server = createWorkBuddyServer({ store, catalog: new WorkBuddyCatalog(), token, port })
+  const server = createWorkBuddyServer({
+    token,
+    port,
+    client,
+    variants: stores.map(({ id, prefix, store }) => ({ id, prefix, store, catalog: new WorkBuddyCatalog() })),
+  })
   await server.start()
 
   const url = `http://127.0.0.1:${server.port()}`

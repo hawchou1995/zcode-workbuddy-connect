@@ -355,44 +355,76 @@ function createStreamNormalizer(res, fallbackModel) {
  * @param {object} [options.logger]
  */
 export function createWorkBuddyServer(options) {
-  const { store, catalog, token } = options
+  const { token } = options
   const port = options.port ?? 0
   const logger = options.logger ?? console
   const client = options.client ?? new WorkBuddyUpstreamClient()
+  /**
+   * Variant registry. Each entry: { id, prefix, store, catalog }.
+   *
+   * The two regions share some model ids (glm-5.3, hy3, deepseek-v4.1-flash…)
+   * with different windows and rates, so the same id cannot stand for both.
+   * The international variant's models are exposed with a `wbai:` prefix on
+   * this endpoint; chat requests carrying that prefix route to the AI store,
+   * and the prefix is stripped before the body goes upstream.
+   */
+  const variants = options.variants ?? [{ id: 'cn', prefix: '', store: options.store, catalog: options.catalog }]
 
-  let lastCredits
-  let lastCatalogError
-  let lastRefreshAtMs
+  let lastCredits = new Map()
+  let lastCatalogError = new Map()
+  let lastRefreshAtMs = new Map()
+
+  function variantForModel(modelId) {
+    for (const v of variants) {
+      if (v.prefix !== '' && modelId.startsWith(v.prefix)) return v
+    }
+    // No prefix: the unprefixed space belongs to the prefix-less variant.
+    return variants.find(v => v.prefix === '') ?? variants[0]
+  }
+
+  function prefixedId(variant, modelId) {
+    return variant.prefix === '' ? modelId : `${variant.prefix}${modelId}`
+  }
+
+  function stripPrefix(variant, modelId) {
+    return variant.prefix === '' ? modelId : modelId.slice(variant.prefix.length)
+  }
 
   /**
-   * Pull the live roster and gate visibility on having a usable credential.
+   * Pull the live roster for every variant and gate visibility on having a
+   * usable credential.
    *
    * The gate is load-bearing: a signed-out account must expose *no* models.
    * Serving the fallback roster to a signed-out user offers models that can
    * only fail, which is worse than showing nothing.
    */
   async function refreshCatalog() {
-    try {
-      const credential = await store.resolve()
-      catalog.setVisible(true)
-      const models = await client.fetchModels(credential)
-      catalog.set(models, { source: client.lastCatalog?.source, fetchedAtMs: client.lastCatalog?.fetchedAtMs })
-      lastCatalogError = undefined
-      lastRefreshAtMs = Date.now()
-      logger.log(`[workbuddy] catalog refreshed: ${models.length} models (${catalog.source})`)
+    const results = []
+    for (const variant of variants) {
+      const { catalog } = variant
       try {
-        lastCredits = await client.fetchCredits(credential)
+        const credential = await variant.store.resolve()
+        catalog.setVisible(true)
+        const models = await client.fetchModels(credential)
+        catalog.set(models, { source: client.lastCatalog?.source, fetchedAtMs: client.lastCatalog?.fetchedAtMs })
+        lastCatalogError.set(variant.id, undefined)
+        lastRefreshAtMs.set(variant.id, Date.now())
+        logger.log(`[workbuddy] ${variant.id} catalog refreshed: ${models.length} models (${catalog.source})`)
+        try {
+          lastCredits.set(variant.id, await client.fetchCredits(credential))
+        } catch (error) {
+          logger.warn(`[workbuddy] ${variant.id} credit lookup failed: ${String(error)}`)
+        }
+        results.push({ variant: variant.id, ok: true, count: models.length })
       } catch (error) {
-        logger.warn(`[workbuddy] credit lookup failed: ${String(error)}`)
+        // No credential: hide the roster rather than advertise unusable models.
+        catalog.setVisible(false)
+        lastCatalogError.set(variant.id, error instanceof Error ? error.message : String(error))
+        logger.warn(`[workbuddy] ${variant.id} catalog unavailable: ${lastCatalogError.get(variant.id)}`)
+        results.push({ variant: variant.id, ok: false, error: lastCatalogError.get(variant.id) })
       }
-      return { ok: true, count: models.length }
-    } catch (error) {
-      // No credential: hide the roster rather than advertise unusable models.
-      catalog.setVisible(false)
-      lastCatalogError = error instanceof Error ? error.message : String(error)
-      logger.warn(`[workbuddy] catalog unavailable: ${lastCatalogError}`)
-      return { ok: false, error: lastCatalogError }
     }
+    return { ok: results.some(r => r.ok), results }
   }
 
   const server = createServer((req, res) => {
@@ -425,17 +457,21 @@ export function createWorkBuddyServer(options) {
     const url = (req.url ?? '/').split('?')[0]
 
     if (req.method === 'GET' && (url === '/healthz' || url === '/healthz/')) {
-      writeJson(res, 200, { ok: true, models: catalog.current().length, catalogSource: catalog.source })
+      writeJson(res, 200, {
+        ok: true,
+        models: variants.reduce((sum, v) => sum + v.catalog.current().length, 0),
+        variants: variants.map(v => ({ id: v.id, models: v.catalog.current().length, source: v.catalog.source, visible: v.catalog.isVisible() })),
+      })
       return
     }
     if (req.method === 'GET' && (url === '/v1/models' || url === '/v1/models/')) {
       writeJson(res, 200, {
         object: 'list',
-        data: catalog.current().map(model => ({
-          id: model.id,
+        data: variants.flatMap(variant => variant.catalog.current().map(model => ({
+          id: prefixedId(variant, model.id),
           object: 'model',
           created: 0,
-          owned_by: 'workbuddy',
+          owned_by: `workbuddy-${variant.id}`,
           // Non-standard extras: harmless to a strict client, and the only way
           // a caller can learn the real window and vision support before it
           // sends a message the upstream would reject.
@@ -443,7 +479,7 @@ export function createWorkBuddyServer(options) {
           max_output_tokens: model.maxTokens,
           supports_images: model.supportsImages,
           display_name: model.name,
-        })),
+        }))),
       })
       return
     }
@@ -453,19 +489,20 @@ export function createWorkBuddyServer(options) {
       return
     }
     if (req.method === 'GET' && (url === '/v1/status' || url === '/v1/status/')) {
-      const status = await store.status()
-      writeJson(res, 200, {
-        auth: status,
-        credits: lastCredits,
+      const statuses = await Promise.all(variants.map(async variant => ({
+        variant: variant.id,
+        auth: await variant.store.status(),
+        credits: lastCredits.get(variant.id),
         catalog: {
-          source: catalog.source,
-          visible: catalog.isVisible(),
-          count: catalog.current().length,
-          fetchedAtMs: catalog.fetchedAtMs,
-          lastRefreshAtMs,
-          error: lastCatalogError,
+          source: variant.catalog.source,
+          visible: variant.catalog.isVisible(),
+          count: variant.catalog.current().length,
+          fetchedAtMs: variant.catalog.fetchedAtMs,
+          lastRefreshAtMs: lastRefreshAtMs.get(variant.id),
+          error: lastCatalogError.get(variant.id),
         },
-      })
+      })))
+      writeJson(res, 200, { variants: statuses })
       return
     }
     if (req.method === 'POST' && (url === '/v1/chat/completions' || url === '/v1/chat/completions/')) {
@@ -480,13 +517,6 @@ export function createWorkBuddyServer(options) {
       writeOpenAIError(res, 415, 'unsupported_media_type', 'Content-Type must be application/json')
       return
     }
-    let credential
-    try {
-      credential = await store.resolve()
-    } catch (error) {
-      writeOpenAIError(res, 401, 'not_signed_in', String(error))
-      return
-    }
 
     const raw = (await readBody(req)).toString('utf8')
     let wantsStream = true
@@ -498,7 +528,27 @@ export function createWorkBuddyServer(options) {
     } catch {
       // prepareChatBody tolerates a non-JSON body; treat it as asking to stream.
     }
-    const prepared = prepareChatBody(raw)
+
+    // The model id carries the region: a `wbai:` prefix routes to the
+    // international store (and is stripped before the body goes upstream);
+    // anything else belongs to the prefix-less variant. Rewriting the model
+    // field textually (rather than re-serialising the parsed body) keeps every
+    // other field byte-identical to what the client sent.
+    const variant = variantForModel(model)
+    const upstreamModel = stripPrefix(variant, model)
+    const escaped = model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const routed = variant.prefix === ''
+      ? raw
+      : raw.replace(new RegExp(`("model"\\s*:\\s*")${escaped}"`), `$1${upstreamModel}"`)
+
+    let credential
+    try {
+      credential = await variant.store.resolve()
+    } catch (error) {
+      writeOpenAIError(res, 401, 'not_signed_in', `${variant.id}: ${String(error)}`)
+      return
+    }
+    const prepared = prepareChatBody(routed)
 
     const controller = new AbortController()
     req.on('close', () => controller.abort())

@@ -47,9 +47,14 @@ export function endpointConfig() {
   return { port: state.port, token: state.token }
 }
 
-/** Path of the plugin-owned credential copy. */
+/** Path of the plugin-owned CN credential copy. */
 export function ownAuthPath() {
   return join(state.stateDir, '.workbuddy-auth.json')
+}
+
+/** Path of the plugin-owned international credential copy. */
+export function ownAuthAiPath() {
+  return join(state.stateDir, '.workbuddy-ai-auth.json')
 }
 
 /** Path of the saved App-version cache. */

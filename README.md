@@ -94,7 +94,7 @@ including each model's real context window and vision support.
 |---|---|
 | Standalone loopback service, not an MCP server | An MCP tool cannot drive ZCode's agent loop; a provider can. Native streaming, tool calls and images come for free. |
 | Zero runtime dependencies | Node 18+ has `fetch`, `AbortSignal.timeout` and `http`. Fewer moving parts to break, and no install step. |
-| CN variant only | This machine has only the CN app installed. The region gate is retained, so adding the international variant is a data change, not a refactor. |
+| Dual region, one service | CN and international (WorkBuddy AI) variants share one endpoint. The AI variant's models carry a `wbai:` prefix so the shared ids (glm-5.3, hy3…) stay distinct, and the prefix routes each chat request to the right credential store. A region whose app is not signed in is skipped at `setup` and exposes no models. |
 | Fixed port + persisted bearer | The client records the bearer in its own config, so it must survive restarts. A per-process secret would break on every restart. |
 | Credential copy kept separate from the desktop app | The app's sign-in file is read-only input. Refreshes go to our own state dir, so the plugin can never break the app's login. |
 | Startup folder for autostart | `schtasks` needs elevation on this host (it fails outright); the Startup folder is per-user and needs none. |
