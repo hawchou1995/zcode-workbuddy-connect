@@ -431,8 +431,15 @@ export function parseModelCatalog(data, international = false) {
     byId.set(id, {
       id,
       name: typeof model['name'] === 'string' && model['name'] !== '' ? model['name'] : id,
-      contextWindow: international && isObject(model['contextWindow']) && positive(model['contextWindow']['defaultLength'])
-        ? model['contextWindow']['defaultLength'] : input,
+      // Window: `contextWindow.defaultLength` is a soft default, not a cap.
+      // Live-verified 2026-09-18 against the international gateway: a
+      // 312,856-token prompt was accepted, while 1,294,869 tokens was rejected
+      // with "> 1048576 maximum" — so `maxInputTokens` is the honest ceiling and
+      // the default understated it (deepseek-v4.1-flash read 300K, gpt-6-astra
+      // 400K, hy4-preview 200K). Declaring the default made ZCode compact early
+      // and waste the window. `defaultContextWindow` keeps the default for
+      // display. Do not switch this back to `defaultLength`.
+      contextWindow: input,
       ...(international ? {
         ...(isObject(model['contextWindow']) && positive(model['contextWindow']['defaultLength'])
           ? { defaultContextWindow: model['contextWindow']['defaultLength'] } : {}),
