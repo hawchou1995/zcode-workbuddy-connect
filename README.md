@@ -91,7 +91,27 @@ node bin/cli.mjs token              # print the endpoint bearer
 
 3. Restart ZCode. The `SessionStart` hook starts the endpoint; the models appear
    in the model selector under **WorkBuddy** (CN) and **WorkBuddy AI**
-   (international, ids prefixed `wbai:`).
+   (international).
+
+### Two regions, two mounts
+
+Both regions are served from one endpoint, told apart by the URL the client
+uses — not by renaming models:
+
+| Region | Provider | Base URL |
+|---|---|---|
+| CN | `workbuddy` | `http://127.0.0.1:39271/v1` |
+| International ("WorkBuddy AI") | `workbuddy-ai` | `http://127.0.0.1:39271/ai/v1` |
+
+Seven model ids exist in both regions (`glm-5.3`, `glm-5.2`, `hy3`,
+`hy4-preview`, `deepseek-v4.1-flash`, `kimi-k2.8-preview`, `kimi-k2.6`) with
+different windows and rates. They are kept apart by the mount rather than by an
+id prefix, because ZCode's picker renders the **raw model id and nothing else**
+in each row while grouping rows under a provider header — so `glm-5.3` under
+"WorkBuddy" and `glm-5.3` under "WorkBuddy AI" are already unambiguous to the
+user, while a `wbai:` prefix was pure noise in the one string they read. A
+leading `wbai:` on a chat request is still *accepted* and wins over the mount, so
+an older config keeps routing correctly. See `docs/adr/0003-region-by-url-path.md`.
 
 ### Limits written into ZCode
 

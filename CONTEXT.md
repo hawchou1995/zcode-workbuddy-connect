@@ -25,15 +25,23 @@ Terms that are easy to conflate in this project, and what each one means here.
 
 **Region** — which WorkBuddy backend a credential belongs to. `cn` for the
 domestic app, `global` for the international one ("WorkBuddy AI"). Chosen from
-the credential's `domain`, not from configuration. The two share model ids
-(`glm-5.3`, `hy3`) with different windows and rates, so a region is part of a
-model's identity on the wire, never an incidental attribute.
+the credential's `domain`, not from configuration. The two share seven model ids
+(`glm-5.3`, `glm-5.2`, `hy3`, `hy4-preview`, `deepseek-v4.1-flash`,
+`kimi-k2.8-preview`, `kimi-k2.6`) with different windows and rates, so a region
+is part of a request's identity, never an incidental attribute.
 
-**Wire id** / **upstream id** — the `wbai:`-prefixed form is the *wire id*, the
-only spelling the endpoint's catalog and ZCode's provider config ever see. The
-*upstream id* is the bare id the WorkBuddy API expects. The prefix is both the
-routing signal and the name-collision separator; it is stripped before the
-request leaves for upstream.
+**Mount** — the URL path segment that selects a region on this endpoint: the
+root for CN, `/ai` for international. This is the *only* channel a client has
+for naming a region, because ZCode sends no provider identifier of any kind (no
+header, no query parameter, no body field) and never calls `/models` to learn a
+roster. See `docs/adr/0003-region-by-url-path.md`.
+
+**Model id** — always the bare upstream id (`glm-5.3`), never region-prefixed.
+The same bare id legitimately appears under both providers; ZCode's picker
+groups rows under a provider header and renders the raw id as the row text, so
+the duplication is unambiguous to the user and the id stays readable. A leading
+`wbai:` is still *accepted* on a chat request for back-compatibility (and wins
+over the mount), but nothing emits it anymore.
 
 **Context window** — the widest prompt the model accepts, from the upstream's
 `maxInputTokens`. Deliberately **not** the upstream's `contextWindow.defaultLength`,
