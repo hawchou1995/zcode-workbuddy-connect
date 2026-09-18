@@ -9,7 +9,7 @@
  *
  * Dependency-free: Node 18+ global fetch only.
  *
- * @module workbuddy-connect/upstream
+ * @module zcode-workbuddy-connect/upstream
  */
 
 import { appUserAgent, resolveAppVersion } from './app-version.js'

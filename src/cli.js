@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * workbuddy-connect CLI.
+ * zcode-workbuddy-connect CLI.
  *
  *   serve     run the loopback OpenAI-compatible endpoint (default)
  *   status    sign-in state, remaining credit, model roster
@@ -9,12 +9,13 @@
  *   doctor    check credentials, upstream reachability, and the endpoint
  *   logout    drop the plugin-owned credential copy
  *
- * @module workbuddy-connect/cli
+ * @module zcode-workbuddy-connect/cli
  */
 
 import { randomBytes } from 'node:crypto'
-import { readFile, writeFile, mkdir, rm } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WorkBuddyCredentialStore, DESKTOP_AUTH_FILENAME, DESKTOP_AUTH_AI_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_AI_AUTH_FILE_ENV } from './auth.js'
@@ -36,7 +37,7 @@ import {
 /** Fixed loopback port the endpoint listens on by default. */
 export const DEFAULT_PORT = 39271
 
-const HELP = `workbuddy-connect — use WorkBuddy desktop-app models from any OpenAI-compatible client
+const HELP = `zcode-workbuddy-connect — use WorkBuddy desktop-app models from any OpenAI-compatible client
 
 Usage: node bin/cli.mjs <command> [options]
 
@@ -58,6 +59,9 @@ Options:
   --home <dir>          State directory (default ${defaultStateDir()})
   --auth-file <path>    Explicit WorkBuddy desktop auth-file path
   --config <path>       provider_config.json to write (setup only)
+  --default-context-window
+                        Advertise the upstream's softer default window instead of
+                        the widest one it admits (serve only; the default is the max)
   --json                Machine-readable output
   -h, --help            This text
 `
@@ -207,7 +211,7 @@ async function commandDoctor(args) {
   if (args.json) {
     console.log(JSON.stringify(report, null, 2))
   } else {
-    console.log(`workbuddy-connect doctor`)
+    console.log(`zcode-workbuddy-connect doctor`)
     console.log(`  dir         ${report.stateDir}`)
     console.log(`  own credential    ${report.ownAuthPath}`)
     console.log(`  own ai credential ${report.ownAuthAiPath}`)
@@ -322,7 +326,7 @@ async function commandLogout(args) {
   }
 }
 
-const AUTOSTART_BASENAME = 'workbuddy-connect.vbs'
+const AUTOSTART_BASENAME = 'zcode-workbuddy-connect.vbs'
 
 /** The current user's Startup folder, or undefined off Windows. */
 function startupFolder() {
@@ -345,6 +349,14 @@ function autostartPath() {
  * the Startup folder is per-user and needs none. A VBS trampoline is what keeps
  * the console window from appearing — launching node.exe directly flashes a
  * console on every logon.
+ *
+ * A third policy layer can still refuse the write: some hosts block script
+ * files (`.vbs`, `.cmd`, `.bat`, `.ps1`) from being created in the Startup
+ * folder while allowing ordinary files beside them — verified on this machine,
+ * where `.txt` writes succeed and every script extension returns EPERM. That is
+ * a deliberate security control, so this command reports it and stops rather
+ * than working around it. Autostart is only the fallback path anyway: the
+ * plugin's `SessionStart` hook is what normally brings the endpoint up.
  */
 async function commandInstallService(args) {
   const target = autostartPath()
@@ -358,13 +370,32 @@ async function commandInstallService(args) {
   const nodePath = process.execPath
 
   const vbs = [
-    "' WorkBuddy Connect — starts the local OpenAI-compatible endpoint hidden at logon.",
+    "' ZCode WorkBuddy Connect — starts the local OpenAI-compatible endpoint hidden at logon.",
     "' Remove this file to disable autostart; it writes nothing else outside the state dir.",
     'Set shell = CreateObject("WScript.Shell")',
     `shell.Run """${nodePath}"" ""${cliPath}"" serve --port ${port}", 0, False`,
     '',
   ].join('\r\n')
-  await writeFile(target, vbs, 'utf8')
+
+  try {
+    await writeFile(target, vbs, 'utf8')
+  } catch (error) {
+    const blocked = error?.code === 'EPERM' || error?.code === 'EACCES'
+    console.error(`error: could not write ${target} (${error?.code ?? 'unknown'}).`)
+    if (blocked) {
+      console.error('  This host blocks script files in the Startup folder. Ordinary files can be')
+      console.error('  written there, but .vbs/.cmd/.bat/.ps1 are refused — a deliberate policy, not a bug.')
+    }
+    console.error('')
+    console.error('  Autostart is optional. The plugin\'s SessionStart hook already starts the')
+    console.error('  endpoint whenever ZCode opens a session, which covers every use of these')
+    console.error('  models from ZCode. Without it, the endpoint still comes up for any session')
+    console.error('  begun after a logon; only a client talking to the port with ZCode closed')
+    console.error('  would need autostart, and that can be started by hand:')
+    console.error(`    node "${cliPath}" serve --port ${port}`)
+    process.exitCode = 1
+    return
+  }
 
   if (args.json) {
     console.log(JSON.stringify({ autostart: target, nodePath, cliPath, port }, null, 2))
@@ -450,28 +481,69 @@ async function commandSetup(args) {
   try {
     document = JSON.parse(await readFile(configPath, 'utf8'))
   } catch {
-    document = { schemaVersion: 1, config: { provider: [], providerConfigRules: { providerRules: [] }, modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] } } }
+    // A fresh document must satisfy the same strict schema as an edited one:
+    // `provider` is NOT a valid key here (it belongs to the legacy CLI registry
+    // in config.json, a different document). Writing it produced a config ZCode
+    // silently discarded in full — caught by docs/validate-provider-config.mjs.
+    document = {
+      schemaVersion: 1,
+      config: {
+        providerOrder: [],
+        providerConfigRules: { providerRules: [] },
+        modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+      },
+    }
   }
   const config = document['config'] ??= {}
   const order = config['providerOrder'] ??= []
   const rules = config['providerConfigRules'] ??= {}
   const providerRules = rules['providerRules'] ??= []
 
-  // Per-model window and vision flags, so ZCode plans context correctly instead
-  // of assuming one window for every row.
+  // Per-model window, output ceiling and vision flags, so ZCode plans context
+  // and output budget correctly instead of assuming one window for every row.
   //
-  // ONLY the keys `extractManualModelConfig` picks survive validation:
-  // `contextWindow`, `inputFormat.{supportsImage,supportsVideo,supportsPdf}`,
-  // and the three `supports*` flags. The rule object is strict, so ONE
-  // unrecognised key fails the whole document, and ZCode's failure mode is to
-  // discard the ENTIRE personal provider config and fall back to an empty one --
-  // silently breaking every other provider too. `maxTokens` is not a property
-  // here (output limits live in `optionSpecs`), which is precisely the mistake
-  // that caused that. Do not add a key to `properties` without finding it in
-  // the schema first.
+  // The rule object is strict (zod `.strict()`), so ONE unrecognised key fails
+  // the WHOLE document, and ZCode's failure mode is to discard the ENTIRE
+  // personal provider config and fall back to an empty one -- silently breaking
+  // every other provider too. The two writable paths, both verified against the
+  // compiled schema in `ZCode\resources\app.asar` (`out/host/index.js`, the
+  // `extractManualModelConfig` / `providerModelRules` schemas):
+  //
+  //   config.properties           {contextWindow, inputFormat.{supportsImage,
+  //                                supportsVideo,supportsPdf}, supportsToolCall,
+  //                                supportsJsonSchemaOutput,
+  //                                supportsNativeWebSearch,
+  //                                supportsMidConversationSystem,
+  //                                requiresMfjsToolSchema}
+  //   config.optionSpecs          {reasoningLevel:{values,map},
+  //                                maxOutputTokens:{max,map}}
+  //
+  // There is NO `maxTokens` property: an output limit lives in
+  // `optionSpecs.maxOutputTokens.max`, which is the ceiling on the value the
+  // user may select (the CLI rejects a selection above it). Writing `maxTokens`
+  // into `properties` is the mistake that caused the whole-document discard.
+  // `map` is optional and deliberately omitted here: the shipped
+  // `openai-chat-completions` API rule already supplies the wire mapping
+  // (`{'max_completion_tokens': maxOutputTokens}`), and an expression-language
+  // typo in a hand-written `map` would fail validation and take the document
+  // down with it. Do not add a key without finding it in the schema first.
   const modelRules = (config['modelConfigRules'] ??= {})
   const providerModelRules = (modelRules['providerModelRules'] ??= [])
   modelRules['manualProviderModelRules'] ??= []
+
+  /**
+   * The widest window the upstream admits for a model.
+   *
+   * `contextWindow` is already `maxInputTokens` (the honest ceiling); the
+   * international catalog additionally declares `supportedContextWindows`,
+   * whose maximum is that same ceiling. Taking the max over both is therefore
+   * a no-op on today's wire but keeps the intent explicit if the upstream ever
+   * ships a `supportedLengths` entry above `maxInputTokens`.
+   */
+  const effectiveContextWindow = model => {
+    const declared = Array.isArray(model.supportedContextWindows) ? model.supportedContextWindows : []
+    return Math.max(model.contextWindow, ...declared, 0)
+  }
 
   const summary = []
   for (const { id, prefix, appName, store } of stores) {
@@ -513,11 +585,17 @@ async function commandSetup(args) {
     let modelCount = 0
     for (const model of models) {
       modelCount += 1
-      const properties = { contextWindow: model.contextWindow }
+      const properties = { contextWindow: effectiveContextWindow(model) }
       if (model.supportsImages) {
         properties['inputFormat'] = { supportsImage: true }
       }
-      const entry = { modelId: prefix === '' ? model.id : `${prefix}${model.id}`, providerId, config: { enabled: true, properties } }
+      const config = { enabled: true, properties }
+      // Ceiling on the selectable output budget, taken from the upstream's own
+      // `maxOutputTokens` rather than a per-model guess.
+      if (Number.isInteger(model.maxTokens) && model.maxTokens > 0) {
+        config['optionSpecs'] = { maxOutputTokens: { max: model.maxTokens } }
+      }
+      const entry = { modelId: prefix === '' ? model.id : `${prefix}${model.id}`, providerId, config }
       const index = providerModelRules.findIndex(item => item?.modelId === entry.modelId && item?.providerId === providerId)
       if (index === -1) providerModelRules.push(entry)
       else providerModelRules[index] = entry
@@ -526,8 +604,27 @@ async function commandSetup(args) {
     summary.push({ providerId, appName, models: wireIds.length, modelRules: modelCount })
   }
 
+  // Write through a temp file and validate before the real path is touched.
+  //
+  // ZCode's provider schema is `.strict()`, and its failure mode is to discard
+  // the ENTIRE document and fall back to an empty config when any rule carries
+  // an unrecognised key. The user's other providers (OpenRouter, DeepSeek, …)
+  // would go with it, and nothing would say why. The validator mirrors the
+  // schema, so a bad key fails loudly here instead of silently there.
   await mkdir(dirname(configPath), { recursive: true })
-  await writeFile(configPath, `${JSON.stringify(document, null, 2)}\n`, 'utf8')
+  const tempPath = `${configPath}.${process.pid}.tmp`
+  const serialized = `${JSON.stringify(document, null, 2)}\n`
+  await writeFile(tempPath, serialized, 'utf8')
+  const verdict = await validateProviderConfig(tempPath)
+  if (!verdict.ok) {
+    await rm(tempPath, { force: true })
+    console.error(`error: refusing to write ${configPath} — the document would be rejected by ZCode's schema:`)
+    for (const problem of verdict.problems) console.error(`  - ${problem}`)
+    console.error('  ZCode discards the whole provider config in that case, so nothing was written.')
+    process.exitCode = 1
+    return
+  }
+  await rename(tempPath, configPath)
 
   if (args.json) {
     console.log(JSON.stringify({ configPath, baseUrl, providers: summary }, null, 2))
@@ -542,6 +639,32 @@ async function commandSetup(args) {
   }
 }
 
+/**
+ * Run the schema mirror over a candidate document.
+ *
+ * Delegates to `docs/validate-provider-config.mjs` rather than reimplementing
+ * the shapes: that file is the one place the schema is written down, and it is
+ * also runnable by hand. A validator that disagrees with itself is worse than
+ * none, so this shells out to it and reads the exit code.
+ *
+ * @returns {Promise<{ok: boolean, problems: string[]}>}
+ */
+async function validateProviderConfig(candidatePath) {
+  const script = fileURLToPath(new URL('../docs/validate-provider-config.mjs', import.meta.url))
+  return await new Promise(resolve => {
+    const child = spawn(process.execPath, [script, candidatePath], { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.on('error', error => resolve({ ok: false, problems: [String(error)] }))
+    child.on('close', code => {
+      const problems = stderr.split('\n')
+        .filter(line => line.trim().startsWith('- '))
+        .map(line => line.trim().slice(2))
+      resolve({ ok: code === 0, problems: problems.length > 0 ? problems : [stderr.trim() || `validator exited ${code}`] })
+    })
+  })
+}
+
 async function commandServe(args) {
   const token = await ensureToken(args)
   const port = args.port === undefined ? DEFAULT_PORT : Number(args.port)
@@ -552,18 +675,26 @@ async function commandServe(args) {
     token,
     port,
     client,
-    variants: stores.map(({ id, prefix, store }) => ({ id, prefix, store, catalog: new WorkBuddyCatalog() })),
+    variants: stores.map(({ id, prefix, store }) => {
+      const catalog = new WorkBuddyCatalog()
+      // Report the widest window the upstream admits rather than the softer
+      // `defaultLength` tier, so a client that reads `/v1/models` plans against
+      // the real ceiling. Same intent as `setup`'s per-model rules; see there
+      // for why this is a no-op on today's wire but explicit on purpose.
+      catalog.setUseMaximumContextWindow(!args.defaultContextWindow)
+      return { id, prefix, store, catalog }
+    }),
   })
   await server.start()
 
   const url = `http://127.0.0.1:${server.port()}`
-  console.log(`[workbuddy-connect] listening on ${url}`)
-  console.log(`[workbuddy-connect] OpenAI-compatible base: ${url}/v1`)
-  console.log(`[workbuddy-connect] bearer: ${token}`)
-  console.log(`[workbuddy-connect] state dir: ${stateDir()}`)
+  console.log(`[zcode-workbuddy-connect] listening on ${url}`)
+  console.log(`[zcode-workbuddy-connect] OpenAI-compatible base: ${url}/v1`)
+  console.log(`[zcode-workbuddy-connect] bearer: ${token}`)
+  console.log(`[zcode-workbuddy-connect] state dir: ${stateDir()}`)
 
   const shutdown = async signal => {
-    console.log(`\n[workbuddy-connect] ${signal} — shutting down`)
+    console.log(`\n[zcode-workbuddy-connect] ${signal} — shutting down`)
     await server.close()
     process.exit(0)
   }
@@ -572,10 +703,10 @@ async function commandServe(args) {
   // Never exit on an unhandled stream error; a single failed request must not
   // take down the endpoint every model call depends on.
   process.on('uncaughtException', error => {
-    console.error(`[workbuddy-connect] uncaught: ${String(error)}`)
+    console.error(`[zcode-workbuddy-connect] uncaught: ${String(error)}`)
   })
   process.on('unhandledRejection', error => {
-    console.error(`[workbuddy-connect] unhandled rejection: ${String(error)}`)
+    console.error(`[zcode-workbuddy-connect] unhandled rejection: ${String(error)}`)
   })
 }
 

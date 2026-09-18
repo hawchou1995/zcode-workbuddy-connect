@@ -1,16 +1,16 @@
 {
-  "name": "workbuddy-connect",
+  "name": "zcode-workbuddy-connect",
   "version": "1.0.0",
-  "description": "Bring WorkBuddy desktop-app models (GLM-5.3, DeepSeek-V4-Pro, Kimi-K3, MiniMax-M3, Hy3 …) into ZCode as an OpenAI-compatible provider, with zero configuration.",
+  "description": "Bring WorkBuddy desktop-app models — domestic and international (GLM-5.3, DeepSeek-V4-Pro, Kimi-K3, MiniMax-M3, Hy3, GPT-5.6, Gemini-3.5-Flash …) — into ZCode as OpenAI-compatible providers, with zero configuration.",
   "description_i18n": {
-    "en": "Bring WorkBuddy desktop-app models into ZCode as an OpenAI-compatible provider, with zero configuration.",
-    "zh-CN": "把 WorkBuddy 桌面 App 里的模型（GLM-5.3、DeepSeek-V4-Pro、Kimi-K3、MiniMax-M3、Hy3 等）零配置接入 ZCode 的模型供应商。"
+    "en": "Bring WorkBuddy desktop-app models, domestic and international, into ZCode as OpenAI-compatible providers, with zero configuration.",
+    "zh-CN": "把 WorkBuddy 桌面 App 的国内版与国际版模型（GLM-5.3、DeepSeek-V4-Pro、Kimi-K3、MiniMax-M3、Hy3、GPT-5.6、Gemini-3.5-Flash 等）零配置接入 ZCode 的模型供应商。"
   },
   "author": {
-    "name": "Ported from corrinehu/dsh-workbuddy-connect (MIT)"
+    "name": "hawchou1995 (a port of corrinehu/dsh-workbuddy-connect, MIT)"
   },
   "license": "MIT",
-  "homepage": "https://github.com/corrinehu/dsh-workbuddy-connect",
+  "homepage": "https://github.com/hawchou1995/zcode-workbuddy-connect",
   "keywords": [
     "workbuddy",
     "codebuddy",

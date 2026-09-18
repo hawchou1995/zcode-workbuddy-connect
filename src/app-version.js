@@ -5,7 +5,7 @@
  * international probe is kept because the region gate still routes an
  * international credential to it.
  *
- * @module workbuddy-connect/app-version
+ * @module zcode-workbuddy-connect/app-version
  */
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises'

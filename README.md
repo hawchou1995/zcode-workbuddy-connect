@@ -1,4 +1,4 @@
-# workbuddy-connect
+# zcode-workbuddy-connect
 
 Use the models inside the **WorkBuddy desktop app** from ZCode (or any
 OpenAI-compatible client), with zero configuration.
@@ -76,17 +76,57 @@ node bin/cli.mjs token              # print the endpoint bearer
    Plugins found this way get the marketplace id `inline` and are enabled by
    default. The listed directory **is** the plugin root — do not nest it.
 
-2. Write the provider entry:
+2. Write the provider entries (one per signed-in region):
 
    ```sh
    node bin/cli.mjs setup
    ```
 
-3. Restart ZCode. The `SessionStart` hook starts the endpoint; the models appear
-   in the model selector under **WorkBuddy**.
+   `setup` refuses to guess: it writes the roster the upstream actually reports,
+   including each model's real context window, output ceiling and vision
+   support. It also **validates before writing** — the document is serialised to
+   a temp file and run through `docs/validate-provider-config.mjs`, and is only
+   renamed into place if it passes. See the strict-schema note below for why
+   that gate is not optional.
 
-`setup` refuses to guess: it writes the roster the upstream actually reports,
-including each model's real context window and vision support.
+3. Restart ZCode. The `SessionStart` hook starts the endpoint; the models appear
+   in the model selector under **WorkBuddy** (CN) and **WorkBuddy AI**
+   (international, ids prefixed `wbai:`).
+
+### Limits written into ZCode
+
+Both limits are taken at their **maximum**:
+
+| ZCode field | Source | Why not the alternative |
+|---|---|---|
+| `properties.contextWindow` | upstream `maxInputTokens` | `contextWindow.defaultLength` is a softer tier the UI offers and can be up to 3.3× smaller; declaring it makes ZCode compact the conversation early and waste the window. Verified by probe: 312,856 tokens accepted, 1,294,869 rejected. |
+| `optionSpecs.maxOutputTokens.max` | upstream `maxOutputTokens` | This is the ceiling on the value a user may select. There is no `maxTokens` property — see below. |
+
+`map` is deliberately left out of `optionSpecs.maxOutputTokens`: the shipped
+`openai-chat-completions` API rule already supplies
+`{'max_completion_tokens': maxOutputTokens}`, so restating it would only add an
+expression-language failure mode. `serve` reports the same window through
+`/v1/models`; `--default-context-window` reverts to the softer number.
+
+### The strict-schema trap
+
+ZCode parses `provider_config.json` with zod schemas that are `.strict()`, and
+its failure mode is brutal: **one unrecognised key anywhere makes ZCode discard
+the entire personal provider config** and fall back to an empty one — taking
+every other provider you had configured (OpenRouter, DeepSeek, …) with it, and
+surfacing no error. Two keys are easy to get wrong:
+
+- **`maxTokens` is not a property.** Output limits live in
+  `optionSpecs.maxOutputTokens.max`.
+- **`provider: []` is not a config key.** It belongs to the legacy CLI registry
+  in `config.json`, a different document.
+
+Both mistakes existed in this codebase and were caught by the validator's first
+run. After any hand-edit, check it yourself:
+
+```sh
+node docs/validate-provider-config.mjs
+```
 
 ## Design decisions
 
@@ -99,6 +139,7 @@ including each model's real context window and vision support.
 | Credential copy kept separate from the desktop app | The app's sign-in file is read-only input. Refreshes go to our own state dir, so the plugin can never break the app's login. |
 | Startup folder for autostart | `schtasks` needs elevation on this host (it fails outright); the Startup folder is per-user and needs none. |
 | Heartbeats during silence | Reasoning models think for minutes; the upstream pads that with SSE comments. Dropping them (as the first port did) leaves the client seeing zero bytes and timing out on a working request. |
+| Validate before writing provider config | A stray key does not fail one model, it silently deletes every provider. A temp file plus a schema mirror turns that into a loud error. |
 
 ## Notes
 
@@ -109,8 +150,8 @@ including each model's real context window and vision support.
 - **Prices are informational.** Rates come from the upstream roster and are
   cached; an expired promotion is dropped (`rateUnknown`) rather than left
   claiming a discount.
-- State lives in `%USERPROFILE%\.workbuddy-connect\`
-  (`WORKBUDDY_CONNECT_HOME` overrides it).
+- State lives in `%USERPROFILE%\.zcode-workbuddy-connect\`
+  (`ZCODE_WORKBUDDY_CONNECT_HOME` overrides it).
 
 ## A note on what this talks to
 
@@ -130,7 +171,7 @@ caveats above are the original's, restated because they matter more than the
 feature list.
 
 **Never committed:** the credential copy, the endpoint bearer, and all runtime
-state. See `.gitignore` — state lives in `%USERPROFILE%\.workbuddy-connect\`, and
+state. See `.gitignore` — state lives in `%USERPROFILE%\.zcode-workbuddy-connect\`, and
 `endpoint.json` there holds a bearer that would let a reader call *your* endpoint.
 
 ## Licence

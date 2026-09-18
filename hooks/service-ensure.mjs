@@ -16,7 +16,7 @@
  *
  * Never fails the session: every path exits 0.
  *
- * @module workbuddy-connect/hooks/service-ensure
+ * @module zcode-workbuddy-connect/hooks/service-ensure
  */
 
 import { spawn } from 'node:child_process'
@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url'
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const cliPath = join(pluginRoot, 'bin', 'cli.mjs')
-const stateDir = process.env['WORKBUDDY_CONNECT_HOME'] ?? join(process.env['USERPROFILE'] ?? '.', '.workbuddy-connect')
+const stateDir = process.env['ZCODE_WORKBUDDY_CONNECT_HOME'] ?? join(process.env['USERPROFILE'] ?? '.', '.zcode-workbuddy-connect')
 const endpointPath = join(stateDir, 'endpoint.json')
 const logPath = join(stateDir, 'service.log')
 const DEFAULT_PORT = 39271
@@ -119,7 +119,7 @@ async function main() {
   // unexplained connection error on the first message.
   await log(`endpoint NOT healthy on :${port} after spawn attempt`)
   console.log(
-    `[workbuddy-connect] The local endpoint is not running on port ${port}.`
+    `[zcode-workbuddy-connect] The local endpoint is not running on port ${port}.`
     + ' Its models will fail until it is started. Start it in a terminal with:\n'
     + `  node "${cliPath}" serve --port ${port}\n`
     + `Diagnostics: node "${cliPath}" doctor`,

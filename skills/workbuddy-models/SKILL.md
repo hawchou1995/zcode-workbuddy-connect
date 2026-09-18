@@ -25,7 +25,7 @@ Everything lives outside the app: nothing here writes to WorkBuddy's files.
 | Thing | Path |
 |---|---|
 | Service + CLI | `${ZCODE_PLUGIN_ROOT}` |
-| State (token copy, endpoint bearer, logs) | `%USERPROFILE%\.workbuddy-connect` |
+| State (token copy, endpoint bearer, logs) | `%USERPROFILE%\.zcode-workbuddy-connect` |
 | Provider entry | `%USERPROFILE%\.zcode\v2\provider_config.json` |
 | WorkBuddy sign-in (read-only) | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info` |
 
@@ -73,14 +73,14 @@ they are the cause.
 4. **Is there credit left?** `status` prints the remaining credit and any
    promotional badges. `402` from the endpoint means insufficient credit, and no
    local fix exists.
-5. **Read the log.** `%USERPROFILE%\.workbuddy-connect\service.log` records hook
+5. **Read the log.** `%USERPROFILE%\.zcode-workbuddy-connect\service.log` records hook
    and startup decisions; the running service also prints to its console.
 
 ## Boundaries — do not cross these
 
 - **Never write to the WorkBuddy desktop app's own files.** The sign-in file is
   read-only input. Token refreshes go to
-  `%USERPROFILE%\.workbuddy-connect\.workbuddy-auth.json` and nowhere else; that
+  `%USERPROFILE%\.zcode-workbuddy-connect\.workbuddy-auth.json` and nowhere else; that
   separation is what stops this plugin from breaking the desktop app's login.
 - **Never ask for or handle the user's WorkBuddy password.** The plugin reuses
   the desktop app's existing session by design; there is no credential to type.

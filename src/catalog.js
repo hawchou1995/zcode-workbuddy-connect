@@ -6,7 +6,7 @@
  * first fetch is in flight or offline. It is deliberately *not* a promise about
  * the upstream's current state.
  *
- * @module workbuddy-connect/catalog
+ * @module zcode-workbuddy-connect/catalog
  */
 
 import { modelWithCurrentPromotion } from './upstream.js'

@@ -6,7 +6,7 @@ yarn.lock
 
 # Runtime state — never commit. The credential copy and the endpoint bearer
 # live here; publishing either would hand over a live WorkBuddy session.
-.workbuddy-connect/
+.zcode-workbuddy-connect/
 .workbuddy-auth.json
 .workbuddy-ai-auth.json
 endpoint.json

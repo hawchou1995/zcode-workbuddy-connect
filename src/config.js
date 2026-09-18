@@ -2,7 +2,7 @@
  * Runtime paths shared across the service. Resolved once at startup so the
  * chat hot path never re-derives them per request.
  *
- * @module workbuddy-connect/config
+ * @module zcode-workbuddy-connect/config
  */
 
 import { join } from 'node:path'
@@ -16,9 +16,9 @@ import { homedir } from 'node:os'
  * WorkBuddy desktop app's files.
  */
 export function defaultStateDir() {
-  const fromEnv = process.env['WORKBUDDY_CONNECT_HOME']
+  const fromEnv = process.env['ZCODE_WORKBUDDY_CONNECT_HOME']
   if (fromEnv !== undefined && fromEnv.trim() !== '') return fromEnv
-  return join(homedir(), '.workbuddy-connect')
+  return join(homedir(), '.zcode-workbuddy-connect')
 }
 
 const state = {

@@ -6,7 +6,7 @@
  * request must therefore also name a loopback Host, and browser-sent Origins
  * must be loopback too, so a rebinding page is rejected on both counts.
  *
- * @module workbuddy-connect/loopback
+ * @module zcode-workbuddy-connect/loopback
  */
 
 /** Hostname of a Host header value, with the port and IPv6 brackets removed. */

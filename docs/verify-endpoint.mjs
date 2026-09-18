@@ -1,5 +1,5 @@
 /**
- * End-to-end verification of the workbuddy-connect endpoint.
+ * End-to-end verification of the zcode-workbuddy-connect endpoint.
  *
  * Run against a live endpoint:   node docs/verify-endpoint.mjs
  * Requires the service to be up on :39271 (node bin/cli.mjs serve).
@@ -13,9 +13,9 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-const stateDir = process.env['WORKBUDDY_CONNECT_HOME'] ?? join(homedir(), '.workbuddy-connect')
+const stateDir = process.env['ZCODE_WORKBUDDY_CONNECT_HOME'] ?? join(homedir(), '.zcode-workbuddy-connect')
 const token = JSON.parse(await readFile(join(stateDir, 'endpoint.json'), 'utf8')).token
-const BASE = process.env['WORKBUDDY_CONNECT_BASE'] ?? 'http://127.0.0.1:39271/v1'
+const BASE = process.env['ZCODE_WORKBUDDY_CONNECT_BASE'] ?? 'http://127.0.0.1:39271/v1'
 const H = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
 let pass = 0, fail = 0

@@ -5,7 +5,7 @@
  * never written. The effective credential is whichever of the two belongs to
  * the currently signed-in account and expires later.
  *
- * @module workbuddy-connect/auth
+ * @module zcode-workbuddy-connect/auth
  */
 
 import { readFile, rm, stat, writeFile, mkdir, rename } from 'node:fs/promises'

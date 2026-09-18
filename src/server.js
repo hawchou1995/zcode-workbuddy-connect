@@ -12,7 +12,7 @@
  * loopback, chat POSTs must be application/json, and the Authorization header
  * must carry this server's configured bearer.
  *
- * @module workbuddy-connect/server
+ * @module zcode-workbuddy-connect/server
  */
 
 import { timingSafeEqual } from 'node:crypto'

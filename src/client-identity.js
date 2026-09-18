@@ -10,7 +10,7 @@
  *
  * Scope: chat requests ONLY. Refresh, catalog and billing keep the CLI-form UA.
  *
- * @module workbuddy-connect/client-identity
+ * @module zcode-workbuddy-connect/client-identity
  */
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
