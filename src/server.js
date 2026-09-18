@@ -360,34 +360,51 @@ export function createWorkBuddyServer(options) {
   const logger = options.logger ?? console
   const client = options.client ?? new WorkBuddyUpstreamClient()
   /**
-   * Variant registry. Each entry: { id, prefix, store, catalog }.
+   * Variant registry. Each entry: { id, path, prefix, store, catalog }.
    *
-   * The two regions share some model ids (glm-5.3, hy3, deepseek-v4.1-flash…)
-   * with different windows and rates, so the same id cannot stand for both.
-   * The international variant's models are exposed with a `wbai:` prefix on
-   * this endpoint; chat requests carrying that prefix route to the AI store,
-   * and the prefix is stripped before the body goes upstream.
+   * The two regions share model ids (glm-5.3, hy3, deepseek-v4.1-flash…) but
+   * bill against separate accounts, so one id cannot stand for both. The region
+   * therefore travels in the URL path rather than in the model id: the root
+   * serves the default variant and `/ai/…` the international one, which keeps
+   * the ids a client displays clean. `prefix` is the legacy disambiguator, still
+   * accepted on a chat request so configurations written before the split keep
+   * routing correctly.
    */
-  const variants = options.variants ?? [{ id: 'cn', prefix: '', store: options.store, catalog: options.catalog }]
+  const variants = options.variants ?? [{ id: 'cn', path: '', prefix: '', store: options.store, catalog: options.catalog }]
 
   let lastCredits = new Map()
   let lastCatalogError = new Map()
   let lastRefreshAtMs = new Map()
 
-  function variantForModel(modelId) {
+  /** The variant a request path is mounted under; the longest mount wins. */
+  function variantForPath(pathname) {
+    let best
     for (const v of variants) {
-      if (v.prefix !== '' && modelId.startsWith(v.prefix)) return v
+      const mount = v.path ?? ''
+      if (mount === '') continue
+      if (pathname !== mount && !pathname.startsWith(`${mount}/`)) continue
+      if (best === undefined || mount.length > (best.path ?? '').length) best = v
     }
-    // No prefix: the unprefixed space belongs to the prefix-less variant.
-    return variants.find(v => v.prefix === '') ?? variants[0]
+    return best
   }
 
-  function prefixedId(variant, modelId) {
-    return variant.prefix === '' ? modelId : `${variant.prefix}${modelId}`
+  /** The variant served at the root, which is what a bare `/v1` addresses. */
+  function defaultVariant() {
+    return variants.find(v => (v.path ?? '') === '') ?? variants[0]
   }
 
-  function stripPrefix(variant, modelId) {
-    return variant.prefix === '' ? modelId : modelId.slice(variant.prefix.length)
+  /**
+   * Legacy route: a model id carrying a variant's old `wbai:` prefix names its
+   * region outright. Returns undefined when the id carries no known prefix.
+   */
+  function variantForPrefix(modelId) {
+    for (const v of variants) {
+      const prefix = v.prefix ?? ''
+      if (prefix !== '' && modelId.startsWith(prefix)) {
+        return { variant: v, modelId: modelId.slice(prefix.length) }
+      }
+    }
+    return undefined
   }
 
   /**
@@ -455,8 +472,14 @@ export function createWorkBuddyServer(options) {
       return
     }
     const url = (req.url ?? '/').split('?')[0]
+    // A variant mount is stripped before routing, so `/ai/v1/chat/completions`
+    // reaches the same handler as `/v1/chat/completions` with the AI variant
+    // selected. Every route honours a mount, management routes included.
+    const scoped = variantForPath(url)
+    const stripped = url.slice(scoped === undefined ? 0 : (scoped.path ?? '').length)
+    const path = stripped === '' ? '/' : stripped
 
-    if (req.method === 'GET' && (url === '/healthz' || url === '/healthz/')) {
+    if (req.method === 'GET' && (path === '/healthz' || path === '/healthz/')) {
       writeJson(res, 200, {
         ok: true,
         models: variants.reduce((sum, v) => sum + v.catalog.current().length, 0),
@@ -464,11 +487,15 @@ export function createWorkBuddyServer(options) {
       })
       return
     }
-    if (req.method === 'GET' && (url === '/v1/models' || url === '/v1/models/')) {
+    if (req.method === 'GET' && (path === '/v1/models' || path === '/v1/models/')) {
+      // Scoped to the mount: `/ai/v1/models` answers with the international
+      // roster under its own clean ids. The aggregate view lives at /healthz
+      // and /v1/status, which report every variant.
+      const listed = scoped === undefined ? [defaultVariant()] : [scoped]
       writeJson(res, 200, {
         object: 'list',
-        data: variants.flatMap(variant => variant.catalog.current().map(model => ({
-          id: prefixedId(variant, model.id),
+        data: listed.flatMap(variant => variant.catalog.current().map(model => ({
+          id: model.id,
           object: 'model',
           created: 0,
           owned_by: `workbuddy-${variant.id}`,
@@ -483,12 +510,12 @@ export function createWorkBuddyServer(options) {
       })
       return
     }
-    if (req.method === 'POST' && (url === '/v1/refresh' || url === '/v1/refresh/')) {
+    if (req.method === 'POST' && (path === '/v1/refresh' || path === '/v1/refresh/')) {
       const result = await refreshCatalog()
       writeJson(res, result.ok ? 200 : 503, result)
       return
     }
-    if (req.method === 'GET' && (url === '/v1/status' || url === '/v1/status/')) {
+    if (req.method === 'GET' && (path === '/v1/status' || path === '/v1/status/')) {
       const statuses = await Promise.all(variants.map(async variant => ({
         variant: variant.id,
         auth: await variant.store.status(),
@@ -505,14 +532,14 @@ export function createWorkBuddyServer(options) {
       writeJson(res, 200, { variants: statuses })
       return
     }
-    if (req.method === 'POST' && (url === '/v1/chat/completions' || url === '/v1/chat/completions/')) {
-      await chatCompletions(req, res)
+    if (req.method === 'POST' && (path === '/v1/chat/completions' || path === '/v1/chat/completions/')) {
+      await chatCompletions(req, res, scoped)
       return
     }
     writeOpenAIError(res, 404, 'not_found', `no such route: ${req.method} ${url}`)
   }
 
-  async function chatCompletions(req, res) {
+  async function chatCompletions(req, res, scoped) {
     if (!isJsonContentType(req)) {
       writeOpenAIError(res, 415, 'unsupported_media_type', 'Content-Type must be application/json')
       return
@@ -529,15 +556,16 @@ export function createWorkBuddyServer(options) {
       // prepareChatBody tolerates a non-JSON body; treat it as asking to stream.
     }
 
-    // The model id carries the region: a `wbai:` prefix routes to the
-    // international store (and is stripped before the body goes upstream);
-    // anything else belongs to the prefix-less variant. Rewriting the model
+    // The region comes from the mount the request arrived on. A legacy `wbai:`
+    // prefix on the id still names it outright and wins, so configurations
+    // written before the split keep routing correctly. Rewriting the model
     // field textually (rather than re-serialising the parsed body) keeps every
     // other field byte-identical to what the client sent.
-    const variant = variantForModel(model)
-    const upstreamModel = stripPrefix(variant, model)
+    const legacy = variantForPrefix(model)
+    const variant = legacy === undefined ? (scoped ?? defaultVariant()) : legacy.variant
+    const upstreamModel = legacy === undefined ? model : legacy.modelId
     const escaped = model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const routed = variant.prefix === ''
+    const routed = upstreamModel === model
       ? raw
       : raw.replace(new RegExp(`("model"\\s*:\\s*")${escaped}"`), `$1${upstreamModel}"`)
 

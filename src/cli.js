@@ -119,13 +119,16 @@ async function ensureToken(args) {
 
 /**
  * The two regions this service serves. Each gets its own credential store
- * (separate desktop file, separate owned copy, separate env override) and its
- * own catalog; the international variant's models are prefixed `wbai:` on the
- * wire so the shared ids (glm-5.3, hy3…) stay distinct.
+ * (separate desktop file, separate owned copy, separate env override), its own
+ * catalog, and its own URL mount: the root for CN, `/ai` for the international
+ * one. The mount is what keeps the shared ids (glm-5.3, hy3…) distinct without
+ * polluting the id a client displays. `prefix` is the legacy disambiguator,
+ * still honoured on the wire for configurations written before the split.
  */
 const VARIANTS = [
   {
     id: 'cn',
+    path: '',
     prefix: '',
     appName: 'WorkBuddy',
     desktopFilename: DESKTOP_AUTH_FILENAME,
@@ -134,6 +137,7 @@ const VARIANTS = [
   },
   {
     id: 'ai',
+    path: '/ai',
     prefix: 'wbai:',
     appName: 'WorkBuddy AI',
     desktopFilename: DESKTOP_AUTH_AI_FILENAME,
@@ -546,7 +550,7 @@ async function commandSetup(args) {
   }
 
   const summary = []
-  for (const { id, prefix, appName, store } of stores) {
+  for (const { id, path: mount, appName, store } of stores) {
     const providerId = id === 'cn' ? 'workbuddy' : 'workbuddy-ai'
     const providerName = appName
     let models = []
@@ -561,10 +565,11 @@ async function commandSetup(args) {
       continue
     }
 
-    // On the wire the AI variant's ids carry the `wbai:` prefix (that is how
-    // the endpoint routes); the model picker shows the prefixed id too, which
-    // is what keeps the shared names (glm-5.3…) distinguishable.
-    const wireIds = models.map(model => prefix === '' ? model.id : `${prefix}${model.id}`)
+    // Ids stay exactly as the region names them. The region travels in the
+    // baseUrl mount below, so nothing has to be encoded into the name a user
+    // reads in the picker.
+    const wiredIds = models.map(model => model.id)
+    const variantBaseUrl = `http://127.0.0.1:${port}${mount}/v1`
 
     const rule = {
       providerId,
@@ -572,9 +577,9 @@ async function commandSetup(args) {
       config: {
         group: 'standard-personal',
         access: { type: 'api-key', apiKey: token },
-        api: { type: 'openai-chat-completions', baseUrl },
-        personalModelIds: wireIds,
-        modelOrder: wireIds,
+        api: { type: 'openai-chat-completions', baseUrl: variantBaseUrl },
+        personalModelIds: wiredIds,
+        modelOrder: wiredIds,
       },
     }
     const existing = providerRules.findIndex(item => item?.providerId === providerId)
@@ -595,13 +600,28 @@ async function commandSetup(args) {
       if (Number.isInteger(model.maxTokens) && model.maxTokens > 0) {
         config['optionSpecs'] = { maxOutputTokens: { max: model.maxTokens } }
       }
-      const entry = { modelId: prefix === '' ? model.id : `${prefix}${model.id}`, providerId, config }
+      const entry = { modelId: model.id, providerId, config }
       const index = providerModelRules.findIndex(item => item?.modelId === entry.modelId && item?.providerId === providerId)
       if (index === -1) providerModelRules.push(entry)
       else providerModelRules[index] = entry
     }
 
-    summary.push({ providerId, appName, models: wireIds.length, modelRules: modelCount })
+    summary.push({ providerId, appName, models: wiredIds.length, modelRules: modelCount, baseUrl: variantBaseUrl, modelIds: wiredIds })
+  }
+
+  // Setup has to be idempotent: it only ever adds or updates, so a rule left
+  // behind by an earlier run — a renamed model, or the retired `wbai:` prefix —
+  // would otherwise linger in the picker forever. Drop every rule that belongs
+  // to a provider we manage but is no longer declared by it.
+  const managed = new Map(stores.map(({ id }) => [id === 'cn' ? 'workbuddy' : 'workbuddy-ai', undefined]))
+  for (const item of summary) {
+    if (item.skipped !== true) managed.set(item.providerId, new Set(item.modelIds))
+  }
+  for (let index = providerModelRules.length - 1; index >= 0; index -= 1) {
+    const declared = managed.get(providerModelRules[index]?.providerId)
+    if (declared !== undefined && !declared.has(providerModelRules[index].modelId)) {
+      providerModelRules.splice(index, 1)
+    }
   }
 
   // Write through a temp file and validate before the real path is touched.
@@ -635,7 +655,7 @@ async function commandSetup(args) {
   console.log(`  bearer    ${mask(token)}`)
   for (const item of summary) {
     if (item.skipped) console.log(`  ${item.appName.padEnd(14)} SKIPPED — ${item.reason.slice(0, 90)}`)
-    else console.log(`  ${item.appName.padEnd(14)} ${item.models} models (${item.modelRules} per-model rules)`)
+    else console.log(`  ${item.appName.padEnd(14)} ${item.models} models (${item.modelRules} per-model rules) @ ${item.baseUrl}`)
   }
 }
 
@@ -675,14 +695,14 @@ async function commandServe(args) {
     token,
     port,
     client,
-    variants: stores.map(({ id, prefix, store }) => {
+    variants: stores.map(({ id, path: mount, prefix, store }) => {
       const catalog = new WorkBuddyCatalog()
       // Report the widest window the upstream admits rather than the softer
       // `defaultLength` tier, so a client that reads `/v1/models` plans against
       // the real ceiling. Same intent as `setup`'s per-model rules; see there
       // for why this is a no-op on today's wire but explicit on purpose.
       catalog.setUseMaximumContextWindow(!args.defaultContextWindow)
-      return { id, prefix, store, catalog }
+      return { id, path: mount, prefix, store, catalog }
     }),
   })
   await server.start()
@@ -690,6 +710,9 @@ async function commandServe(args) {
   const url = `http://127.0.0.1:${server.port()}`
   console.log(`[zcode-workbuddy-connect] listening on ${url}`)
   console.log(`[zcode-workbuddy-connect] OpenAI-compatible base: ${url}/v1`)
+  for (const { id, path: mount } of stores) {
+    console.log(`[zcode-workbuddy-connect]   ${id.padEnd(3)} mount: ${url}${mount}/v1`)
+  }
   console.log(`[zcode-workbuddy-connect] bearer: ${token}`)
   console.log(`[zcode-workbuddy-connect] state dir: ${stateDir()}`)
 

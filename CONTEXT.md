@@ -5,17 +5,18 @@ OpenAI-compatible model providers. A port of
 `corrinehu/dsh-workbuddy-connect` (MIT) from the DeepSeek Harness plugin API to
 ZCode's.
 
-- **Provider entries**: `workbuddy` (CN) and `workbuddy-ai` (international, ids
-  `wbai:`-prefixed) in `%USERPROFILE%\.zcode\v2\provider_config.json`
-- **Endpoint**: `http://127.0.0.1:39271/v1` (loopback only)
+- **Provider entries**: `workbuddy` (CN, root mount) and `workbuddy-ai`
+  (international, `/ai` mount) in `%USERPROFILE%\.zcode\v2\provider_config.json`
+- **Endpoint**: `http://127.0.0.1:39271/v1` (CN) and
+  `http://127.0.0.1:39271/ai/v1` (WorkBuddy AI) — loopback only
 - **State**: `%USERPROFILE%\.zcode-workbuddy-connect\`
-- **Roster**: 36 models across two regions — CN (16): GLM-5.3 / 5.3-Flash /
-  5.2 / 5.1 / 5v-Turbo, DeepSeek-V4-Pro / V4.1-Flash, Kimi-K3-1 / K2.8-Preview /
-  K2.7 / K2.6, MiniMax-M3, Hy4-preview / Hy3 (free) / Hy3-X, Auto; AI (20,
-  `wbai:` prefixed): GPT-5.6 Sol / Terra / Luna, GPT-5.5 / 5.4, GPT-6-Astra,
-  Gemini-3.5-Flash, GLM-5.3 / 5.2, Kimi-K3 / K2.8-Preview / K2.6,
+- **Roster**: 36 models across two regions — CN (16, root mount): GLM-5.3 /
+  5.3-Flash / 5.2 / 5.1 / 5v-Turbo, DeepSeek-V4-Pro / V4.1-Flash, Kimi-K3-1 /
+  K2.8-Preview / K2.7 / K2.6, MiniMax-M3, Hy4-preview / Hy3 (free) / Hy3-X,
+  Auto; AI (20, `/ai` mount): GPT-5.6 Sol / Terra / Luna, GPT-5.5 / 5.4,
+  GPT-6-Astra, Gemini-3.5-Flash, GLM-5.3 / 5.2, Kimi-K3 / K2.8-Preview / K2.6,
   DeepSeek-V4.1-Flash (free), Hy4-preview / Hy3 (free), Auto / Fast / Balanced /
-  Primary / Deep
+  Primary / Deep. Both mounts use the upstream ids verbatim.
 - **Skill**: `workbuddy-models` — how to operate and troubleshoot it
 
 ## Glossary
