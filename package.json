@@ -15,12 +15,14 @@
     ".": "./src/upstream.js",
     "./server": "./src/server.js",
     "./auth": "./src/auth.js",
-    "./catalog": "./src/catalog.js"
+    "./catalog": "./src/catalog.js",
+    "./desktop-credential-protection": "./src/desktop-credential-protection.js"
   },
   "scripts": {
     "serve": "node bin/cli.mjs serve",
     "status": "node bin/cli.mjs status",
-    "doctor": "node bin/cli.mjs doctor"
+    "doctor": "node bin/cli.mjs doctor",
+    "test": "node --test"
   },
   "dependencies": {},
   "keywords": [

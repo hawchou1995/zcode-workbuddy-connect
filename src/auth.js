@@ -12,6 +12,15 @@ import { readFile, rm, stat, writeFile, mkdir, rename } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { regionOf } from './upstream.js'
+import {
+  WorkBuddyAtRestKeyProvider,
+  WorkBuddyElectronPathError,
+  classifyDesktopAuthDocument,
+  keyIdsOf,
+  openAuthField,
+  reasonCodeOf,
+  unwrapDesktopAuthDocument,
+} from './desktop-credential-protection.js'
 
 /** Current on-disk format of the plugin-owned copy; readers reject others. */
 const OWN_FORMAT_VERSION = 1
@@ -159,10 +168,14 @@ export class WorkBuddyCredentialStore {
    * @param {object} options
    * @param {(credential: object) => Promise<object>} options.refresh performs the upstream token refresh
    * @param {string} options.ownPath plugin-owned credential copy path
-   * @param {string} [options.desktopPath] explicit desktop auth-file path   * @param {string} [options.desktopFilename] basename for the platform-default probe (variant selection)
+   * @param {string} [options.desktopPath] explicit desktop auth-file path
+   * @param {string} [options.desktopFilename] basename for the platform-default probe (variant selection)
    * @param {string} [options.authFileEnv] env var overriding the desktop path (default WORKBUDDY_AUTH_FILE)
    * @param {string} [options.appName] display name for diagnostics ('WorkBuddy' | 'WorkBuddy AI')
    * @param {number} [options.refreshMarginMs] refresh this long before expiry
+   * @param {{ protectorKeyFor: (requested: readonly string[]) => Promise<Buffer>, helperPath: () => string | undefined }} [options.keyProvider]
+   *        opens WorkBuddy 5.6 at-rest envelopes by spawning the app's own
+   *        Electron; injected per variant by the composition root
    */
   constructor(options) {
     this.refresh = options.refresh
@@ -172,6 +185,12 @@ export class WorkBuddyCredentialStore {
     this.desktopFilename = options.desktopFilename ?? DESKTOP_AUTH_FILENAME
     this.authFileEnv = options.authFileEnv ?? WORKBUDDY_AUTH_FILE_ENV
     this.appName = options.appName ?? 'WorkBuddy'
+    // Injected per variant by the composition root: the provider knows nothing
+    // about which product it serves, only how it was configured. The no-arg
+    // default is deliberately the safe one — no default binary, no discovery —
+    // so a store built without a provider never reaches for another product's
+    // app; it reports that no binary is configured instead.
+    this.keyProvider = options.keyProvider ?? new WorkBuddyAtRestKeyProvider()
     this.inflight = undefined
   }
 
@@ -250,10 +269,45 @@ export class WorkBuddyCredentialStore {
         source: credential.source,
       }
     } catch (error) {
-      // A region mismatch (or an unreadable file) is a *diagnosable* signed-out
-      // state, not a silent one.
-      return { state: 'signed-out', reason: error instanceof Error ? error.message : String(error) }
+      // A region mismatch, an unreadable desktop file, or a failed envelope
+      // open is a *diagnosable* signed-out state, not a silent one. The reason
+      // stays human-readable; the code is the machine-readable counterpart, so
+      // a caller never has to parse the prose.
+      const reason = error instanceof Error ? error.message : String(error)
+      const reasonCode = reasonCodeOf(error)
+      return {
+        state: 'signed-out',
+        reason,
+        ...(reasonCode === undefined ? {} : { reasonCode }),
+      }
     }
+  }
+
+  /**
+   * Classify the first desktop candidate that exists and carries content;
+   * `absent` when none does. An empty first file is skipped so it cannot mask
+   * a real document on the next candidate. Diagnostics only — it never spawns
+   * the key helper and never decrypts, so doctor can describe the file without
+   * attempting the unlock.
+   */
+  async desktopAuthFormat() {
+    for (const desktopPath of this.resolveDesktopCandidates()) {
+      let text
+      try {
+        text = await readFile(desktopPath, 'utf8')
+      } catch (error) {
+        if (!isENOENT(error)) throw error
+        continue
+      }
+      const format = classifyDesktopAuthDocument(text).format
+      if (format !== 'absent') return format
+    }
+    return 'absent'
+  }
+
+  /** The Electron binary the key helper would use; diagnostics only. */
+  keyHelperPath() {
+    return this.keyProvider.helperPath()
   }
 
   /** Remove the plugin-owned copy; the desktop file is untouched. */
@@ -305,19 +359,64 @@ export class WorkBuddyCredentialStore {
 
   /**
    * Read the first desktop candidate that exists. Only an absent file (ENOENT)
-   * falls through to the next candidate; a file that is present but unparsable
+   * falls through to the next candidate; a file that is present but unreadable
    * is authoritative for its slot, so a stale older-version file never
    * silently wins over a broken newer one.
+   *
+   * Since WorkBuddy 5.6 the token fields may arrive in at-rest envelopes, so the
+   * text is classified before the regular parser sees it. An encrypted
+   * document must be *opened*, never skipped; an unrecognized one must fail
+   * loudly. The desktop file, as long as it exists, is the identity authority —
+   * a document this plugin cannot read must surface as a diagnosis rather than
+   * be papered over by the plugin-owned copy, which belongs to whatever account
+   * was signed in when it was last refreshed. Only an absent (or empty) file
+   * lets the probe continue.
    */
   async readDesktop() {
     for (const desktopPath of this.resolveDesktopCandidates()) {
+      let text
       try {
-        return parseWorkBuddyAuth(await readFile(desktopPath, 'utf8'))
+        text = await readFile(desktopPath, 'utf8')
       } catch (error) {
         if (!isENOENT(error)) throw error
+        continue
       }
+      const classification = classifyDesktopAuthDocument(text)
+      if (classification.format === 'plaintext') return parseWorkBuddyAuth(text)
+      if (classification.format === 'absent') continue
+      if (classification.format === 'unrecognized') {
+        throw new Error(
+          `the desktop auth file at ${desktopPath} exists but is unreadable`
+          + ' (neither a plaintext credential nor a decodable WorkBuddy 5.6 envelope);'
+          + ' fix or remove the file — it outranks the plugin-owned credential copy',
+        )
+      }
+      return await this.openEncryptedDesktop(classification)
     }
     return undefined
+  }
+
+  /**
+   * Open a 5.6 encrypted desktop document into the regular credential shape.
+   * The rebuilt plaintext goes through the same parser a plaintext document
+   * uses, so identity and expiry need no second code path.
+   */
+  async openEncryptedDesktop(classification) {
+    const wrapped = classification.wrapped
+    const key = await this.keyProvider.protectorKeyFor(keyIdsOf(wrapped.fields))
+    const text = unwrapDesktopAuthDocument(classification, field => {
+      const plaintext = openAuthField(key, field.envelope)
+      if (plaintext === undefined) {
+        throw new WorkBuddyElectronPathError(
+          'encrypted-credential-unreadable',
+          `the encrypted desktop credential's ${field.field} could not be decrypted`
+          + ` (envelope key id ${field.envelope.keyId});`
+          + ' the WorkBuddy app may hold a different at-rest key — open it once to reseal the sign-in',
+        )
+      }
+      return plaintext
+    })
+    return parseWorkBuddyAuth(text)
   }
 
   async readOwn() {

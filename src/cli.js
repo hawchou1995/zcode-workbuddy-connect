@@ -19,6 +19,11 @@ import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WorkBuddyCredentialStore, DESKTOP_AUTH_FILENAME, DESKTOP_AUTH_AI_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_AI_AUTH_FILE_ENV } from './auth.js'
+import {
+  WorkBuddyAtRestKeyProvider,
+  defaultDiscoveryFor,
+  defaultWorkBuddyElectronPaths,
+} from './desktop-credential-protection.js'
 import { WorkBuddyCatalog } from './catalog.js'
 import { WorkBuddyUpstreamClient } from './upstream.js'
 import { createWorkBuddyServer } from './server.js'
@@ -146,6 +151,25 @@ const VARIANTS = [
   },
 ]
 
+/**
+ * The at-rest key provider for one variant.
+ *
+ * The difference between the two variants is deliberately expressed as
+ * configuration, not as variant logic inside the provider: the CN app has a
+ * verified install layout and a verified encrypted-credential chain on both
+ * platforms, so it gets the platform default and (on macOS) Spotlight
+ * discovery; the international app gets a Windows default only, because its
+ * macOS layout and its encrypted credential chain have never been verified
+ * live — upstream refuses to auto-discover it for exactly that reason, and this
+ * port keeps that refusal on macOS and Linux.
+ */
+function variantKeyProvider(variant) {
+  return new WorkBuddyAtRestKeyProvider({
+    discovery: defaultDiscoveryFor(variant.id),
+    defaultElectronPaths: defaultWorkBuddyElectronPaths(variant.id),
+  })
+}
+
 function buildStores(args) {
   const client = new WorkBuddyUpstreamClient()
   const stores = VARIANTS.map(variant => ({
@@ -157,6 +181,7 @@ function buildStores(args) {
       authFileEnv: variant.authFileEnv,
       appName: variant.appName,
       ...(variant.id === 'cn' && typeof args.authFile === 'string' ? { desktopPath: args.authFile } : {}),
+      keyProvider: variantKeyProvider(variant),
     }),
   }))
   return { client, stores }
@@ -176,6 +201,22 @@ async function commandDoctor(args) {
       detail: present.length > 0 ? present[0] : `not found; looked at ${candidates.join(' , ')}`,
     })
 
+    // How the on-disk file reads. WorkBuddy 5.6 seals the token fields at
+    // rest, so "encrypted" is the healthy state for a current install, not an
+    // error — the unlock happens in the sign-in state below. Classification
+    // spawns nothing and decrypts nothing, so this line stays cheap.
+    const format = await store.desktopAuthFormat()
+    report[`${id}AuthFormat`] = format
+    report['checks'].push({
+      name: `${appName} auth file format`,
+      ok: format !== 'unrecognized',
+      detail: format === 'unrecognized'
+        ? 'neither a plaintext credential nor a decodable WorkBuddy 5.6 envelope; fix or remove the file'
+        : format === 'encrypted'
+          ? 'WorkBuddy 5.6 at-rest envelope (tokens sealed)'
+          : format,
+    })
+
     const status = await store.status()
     report[`${id}AuthStatus`] = status
     report['checks'].push({
@@ -185,6 +226,20 @@ async function commandDoctor(args) {
         ? `${status.nickname ?? '(unnamed)'} · uid ${mask(status.uid)} · expires ${formatTime(status.expiresAtMs)}`
         : (status.reason ?? `no credential found; sign in once in the ${appName} desktop app`),
     })
+
+    // Only an encrypted document needs the app's own Electron to be opened.
+    // Naming the binary (or the fact that none is configured) is what makes a
+    // signed-out state beside a sealed file actionable.
+    if (format === 'encrypted') {
+      const helper = store.keyHelperPath()
+      report['checks'].push({
+        name: `${appName} key helper`,
+        ok: helper !== undefined && existsSync(helper),
+        detail: helper === undefined
+          ? 'no WorkBuddy Electron binary is configured for this platform; set WORKBUDDY_ELECTRON_BIN to the app\'s Electron binary'
+          : helper,
+      })
+    }
 
     if (status.state === 'signed-in') {
       try {

@@ -93,6 +93,50 @@ node bin/cli.mjs token              # print the endpoint bearer
    in the model selector under **WorkBuddy** (CN) and **WorkBuddy AI**
    (international).
 
+### WorkBuddy 5.6 encrypted credentials
+
+Since 5.6 the desktop app no longer writes its sign-in as plain JSON: both
+token fields arrive sealed in a `{$wbEncrypted:1, envelope}` wrapper opened with
+AES-256-GCM. The at-rest key lives in the app's own (Electron-modified) process,
+so the plugin unlocks a sealed file by running **the app's own Electron binary
+once as plain Node** (`ELECTRON_RUN_AS_NODE=1`) and asking its private
+`workbuddyStorage` binding for the sealed secret. The key is derived with
+`sha256(atRestSecretKey)`, cached in memory only, and never written anywhere.
+
+This is automatic on Windows and macOS for the CN app, whose install locations
+are the platform defaults:
+
+| Platform | CN (`WorkBuddy`) | International (`WorkBuddy AI`) |
+|---|---|---|
+| Windows | `C:\Program Files\WorkBuddy\WorkBuddy.exe` | `C:\Program Files\WorkBuddyAI\WorkBuddyAI.exe` |
+| macOS | `/Applications/WorkBuddy.app/Contents/MacOS/Electron`, falling back to a Spotlight search for the CN bundle id | none — `WORKBUDDY_ELECTRON_BIN` only |
+| Linux | none — `WORKBUDDY_ELECTRON_BIN` only | none — `WORKBUDDY_ELECTRON_BIN` only |
+
+**Overriding the binary.** If your app lives somewhere else, point the plugin at
+it:
+
+```sh
+set WORKBUDDY_ELECTRON_BIN=C:\path\to\WorkBuddy.exe
+```
+
+The variable must be set in the environment the **service** starts in — for the
+ZCode `SessionStart` hook, that means ZCode's own environment, so restart ZCode
+after setting it. Setting it only in a terminal does nothing.
+
+There is deliberately **no automatic search on Linux**, and **none at all for
+the international app on macOS/Linux**: upstream restricts auto-discovery to the
+one product and platform whose encrypted-credential chain has been verified
+live, and executing a binary that has not been identified is not something a
+credential reader should do on a guess.
+
+`node bin/cli.mjs doctor` reports what it found — the file's format
+(`encrypted` is the healthy state for a current install), which Electron binary
+the unlock would use, and, when the unlock fails, a reason naming sizes, key ids
+and exit codes only.
+
+The reasoning behind this — and where it deliberately differs from upstream's
+discovery policy — is in `docs/adr/0004-workbuddy-56-at-rest-credentials.md`.
+
 ### Two regions, two mounts
 
 Both regions are served from one endpoint, told apart by the URL the client
@@ -160,6 +204,7 @@ node docs/validate-provider-config.mjs
 | Startup folder for autostart | `schtasks` needs elevation on this host (it fails outright); the Startup folder is per-user and needs none. |
 | Heartbeats during silence | Reasoning models think for minutes; the upstream pads that with SSE comments. Dropping them (as the first port did) leaves the client seeing zero bytes and timing out on a working request. |
 | Validate before writing provider config | A stray key does not fail one model, it silently deletes every provider. A temp file plus a schema mirror turns that into a loud error. |
+| Decrypt WorkBuddy 5.6 credentials inside the plugin | Since 5.6 the desktop app seals `accessToken`/`refreshToken` at rest, so the file is no longer readable as plain JSON. The plugin opens them by running the app's own Electron once as Node and reading its private storage binding — never by copying the tokens anywhere new. |
 
 ## Notes
 

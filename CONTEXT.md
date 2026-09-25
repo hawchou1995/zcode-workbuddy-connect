@@ -73,6 +73,23 @@ in `endpoint.json` (mode 0600). Distinct from the WorkBuddy credential: it never
 travels upstream, and it must be *stable* rather than per-process because ZCode
 records it in its own config.
 
+**At-rest envelope** — how WorkBuddy 5.6+ stores the two token fields in the
+desktop auth file: a `{$wbEncrypted:1, envelope}` wrapper opened with
+AES-256-GCM, under a key derived from the app's own `atRestSecretKey`. The key
+is in neither the file nor this plugin's process. See
+`docs/adr/0004-workbuddy-56-at-rest-credentials.md`.
+
+**Key helper** — the app's own Electron binary, run once as plain Node
+(`ELECTRON_RUN_AS_NODE=1`) and asked for the private `workbuddyStorage`
+binding's payload. Resolved from a platform default, macOS Spotlight (CN only)
+or `WORKBUDDY_ELECTRON_BIN`; never from a search that could run the other
+product's binary.
+
+**Desktop auth format** — `absent` / `plaintext` / `encrypted` /
+`unrecognized`, as `doctor` reports it. `encrypted` is the healthy state of a
+current install, not an error. `unrecognized` is the one that must fail loudly:
+the desktop file outranks the plugin-owned copy wherever it exists.
+
 
 ## Start / stop
 
@@ -103,16 +120,20 @@ ZCode's own third-party-model support points at it. See
 | `hooks/service-ensure.mjs` | self-verifying endpoint starter |
 | `src/upstream.js` | WorkBuddy wire client |
 | `src/auth.js` | credential discovery and refresh |
+| `src/desktop-credential-protection.js` | 5.6 at-rest envelope classification, key resolution, field decryption |
 | `src/catalog.js` | model roster (+ static fallback) |
 | `src/server.js` | the endpoint |
 | `src/loopback.js` | Host/Origin guards |
 | `src/client-identity.js`, `src/app-version.js` | desktop-shaped chat identity |
 | `src/config.js` | runtime paths |
 | `src/cli.js`, `bin/cli.mjs` | CLI |
+| `tests/` | `node --test` suites: envelope crypto, credential integration, platform defaults, Spotlight discovery |
 | `docs/validate-provider-config.mjs` | strict-schema mirror; gates every `setup` write |
 | `docs/verify-endpoint.mjs` | end-to-end check against a live endpoint |
 | `docs/adr/0001-…` | why a loopback provider rather than a plugin/MCP server |
 | `docs/adr/0002-…` | widest window + output ceiling, and the strict-schema trap |
+| `docs/adr/0003-…` | region by URL path, not by an id prefix |
+| `docs/adr/0004-…` | WorkBuddy 5.6 at-rest envelopes, the key helper, and the discovery policy |
 
 Upstream: <https://github.com/corrinehu/dsh-workbuddy-connect>
 
